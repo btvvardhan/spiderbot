@@ -55,6 +55,8 @@ class SpiderbotEnvCfg(DirectRLEnvCfg):
     observation_space = 48
     state_space = 0
 
+
+
     # simulation
     sim: SimulationCfg = SimulationCfg(
         dt=1 / 200,
@@ -96,29 +98,6 @@ class SpiderbotEnvCfg(DirectRLEnvCfg):
 
     # robot
 
-    robot_cfg: ArticulationCfg = ArticulationCfg(
-        prim_path="/World/envs/env_.*/Spider",
-        spawn=sim_utils.UsdFileCfg(
-            usd_path="/home/teja/spiderbot/assets/spiderbot/spiderbot.usd",   # see 1B below
-            articulation_props=sim_utils.ArticulationRootPropertiesCfg(
-                enabled_self_collisions=True, solver_position_iteration_count=8
-            ),
-            rigid_props=sim_utils.RigidBodyPropertiesCfg(
-                disable_gravity=False, max_depenetration_velocity=5.0
-            ),
-            activate_contact_sensors=True, 
-        ),
-        actuators={
-        "legs": ImplicitActuatorCfg(
-            joint_names_expr=[r".*"],    # start broad; we’ll narrow to legs later
-            stiffness=1000.0,
-            damping=10.0,
-            effort_limit_sim=200.0,
-            velocity_limit_sim=100.0,
-        )
-    },
-
-    )
 
         # --- robot cfg ---
     robot_cfg: ArticulationCfg = ArticulationCfg(
@@ -173,3 +152,7 @@ class SpiderbotEnvCfg(DirectRLEnvCfg):
     action_rate_reward_scale = -0.01
     flat_orientation_reward_scale = -5.0
     max_tilt_angle_deg = 45.0
+
+
+
+
