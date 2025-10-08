@@ -129,6 +129,8 @@ class SpiderbotEnv(DirectRLEnv):
                 "contact_timing",
                 "foot_slip",
                 "body_height",  # ← NEW: Body height reward
+                'movement_bonus',  # ← NEW: Anti-standing reward,
+                "amplitude_penalty",  # ← NEW: CPG amplitude penalty
             ]
         }
 
@@ -257,131 +259,122 @@ class SpiderbotEnv(DirectRLEnv):
         observations = {"policy": obs}
         return observations
 
+
     def _get_rewards(self) -> torch.Tensor:
-        """
-        Compute reward signal for RL.
-        
-        Rewards encourage:
-        1. Following velocity commands (task objective)
-        2. Stable, efficient locomotion (energy, smoothness)
-        3. Bio-inspired gait patterns (symmetry, coordination)
-        
-        Returns:
-            Total reward per environment [num_envs]
-        """
+        """Compute reward signal - ENFORCES FORWARD MOVEMENT."""
         
         # ============================================
-        # VELOCITY TRACKING REWARDS
+        # VELOCITY TRACKING (MADE STRICTER)
         # ============================================
-        # Reward tracking desired linear velocity (x, y)
         lin_vel_error = torch.sum(
             torch.square(self._commands[:, :2] - self._robot.data.root_lin_vel_b[:, :2]), 
             dim=1
         )
-        lin_vel_error_mapped = torch.exp(-lin_vel_error / 0.25)
+        # ✅ CHANGED: Stricter tracking (0.15 → 0.10)
+        lin_vel_error_mapped = torch.exp(-lin_vel_error / 0.10)  
         
-        # Reward tracking desired yaw rate
         yaw_rate_error = torch.square(self._commands[:, 2] - self._robot.data.root_ang_vel_b[:, 2])
         yaw_rate_error_mapped = torch.exp(-yaw_rate_error / 0.25)
         
         # ============================================
         # STABILITY PENALTIES
         # ============================================
-        # Penalize vertical velocity (should stay at constant height)
         z_vel_error = torch.square(self._robot.data.root_lin_vel_b[:, 2])
-        
-        # Penalize angular velocity in x/y (should not roll/pitch)
         ang_vel_error = torch.sum(torch.square(self._robot.data.root_ang_vel_b[:, :2]), dim=1)
-        
-        # Penalize large torques (energy efficiency)
         joint_torques = torch.sum(torch.square(self._robot.data.applied_torque), dim=1)
-        
-        # Penalize joint acceleration (smoothness)
         joint_accel = torch.sum(torch.square(self._robot.data.joint_acc), dim=1)
-        
-        # Penalize action rate (smooth CPG parameter changes)
         action_rate = torch.sum(torch.square(self._actions - self._previous_actions), dim=1)
-        
-        # Penalize tilting (keep body upright)
         flat_orientation = torch.sum(torch.square(self._robot.data.projected_gravity_b[:, :2]), dim=1)
         
         # ============================================
-        # NEW: CPG-SPECIFIC REWARDS
+        # CPG REWARDS
         # ============================================
-        
-        # 1. Smooth frequency changes
-        # Biological gaits don't change frequency abruptly
         frequency_change = torch.sum(
             torch.square(self._cpg_frequency - self._previous_frequency), 
             dim=1
         )
         self._previous_frequency = self._cpg_frequency.clone()
         
-        # 2. Gait symmetry
-        # Left and right legs should have similar amplitudes (balanced gait)
-        # Assuming leg order: FL, FR, BL, BR (each with 3 joints)
-        left_amps = self._cpg_amplitudes[:, [0,1,2, 6,7,8]]   # FL + BL
-        right_amps = self._cpg_amplitudes[:, [3,4,5, 9,10,11]]  # FR + BR
-        #gait_symmetry = torch.sum(torch.square(left_amps.mean(dim=1) - right_amps.mean(dim=1)))
+        left_amps = self._cpg_amplitudes[:, [0,1,2, 6,7,8]]
+        right_amps = self._cpg_amplitudes[:, [3,4,5, 9,10,11]]
         gait_symmetry = torch.square(left_amps.mean(dim=1) - right_amps.mean(dim=1))
-
-        # 3. Contact timing reward
-        # Feet should touch ground when CPG is in stance phase
-        # This requires computing expected contact from CPG phase
-        # Simplified: reward having 2-3 feet in contact (stable tetrapod)
+        
         net_contact_forces = self._contact_sensor.data.net_forces_w_history
-        foot_contacts = torch.norm(net_contact_forces[:, :, self._foot_ids], dim=-1)  # [num_envs, history, 4_feet]
-        feet_in_contact = (foot_contacts[:, -1, :] > 1.0).sum(dim=1)  # Count feet touching ground
-        # Ideal: 2-3 feet in contact (tetrapod gait)
-        contact_timing = -torch.square(feet_in_contact.float() - 2.5)  # Peak reward at 2.5 feet
+        foot_contacts = torch.norm(net_contact_forces[:, :, self._foot_ids], dim=-1)
+        feet_in_contact = (foot_contacts[:, -1, :] > 1.0).sum(dim=1)
+        contact_timing = -torch.square(feet_in_contact.float() - 2.5)
         
-        # 4. Foot slip penalty
-        # During stance phase, feet should not slide
-        # Simplified: penalize foot velocity when in contact
-        # This requires foot body velocities - may need to add to observations
-        # For now, use a placeholder (you can implement later)
         foot_slip = torch.zeros(self.num_envs, device=self.device)
-        # ============================================
-        # NEW: BODY HEIGHT REWARD
-        # ============================================
-        # Penalize low body height (prevents crawling on belly)
-        # Target height: 0.15m (matches initial spawn height)
-        target_height = 0.15
-        current_height = self._robot.data.root_pos_w[:, 2]  # Z-coordinate of base
-        height_error = torch.square(current_height - target_height)
-
         
         # ============================================
-        # COMBINE ALL REWARDS
+        # HEIGHT REWARD (MUCH SOFTER!)
+        # ============================================
+        target_height = 0.15
+        current_height = self._robot.data.root_pos_w[:, 2]
+        height_error = torch.square(current_height - target_height)
+        
+        # ============================================
+        # ✅ NEW: ANTI-STANDING PENALTY
+        # ============================================
+        # HARSHLY penalize standing still!
+        forward_vel = self._robot.data.root_lin_vel_b[:, 0]  # X velocity
+        
+        # If moving forward > 0.1 m/s: bonus
+        # If moving forward < 0.05 m/s: MASSIVE PENALTY
+        movement_bonus = torch.where(
+            forward_vel > 0.10,
+            forward_vel * 10.0,           # Reward: +1.0 to +5.0 for moving
+            (forward_vel - 0.10) * 50.0   # Penalty: -5.0 for standing still
+        )
+        
+        # ============================================
+        # ✅ NEW: CPG AMPLITUDE PENALTY
+        # ============================================
+        # If CPG amplitudes are too small, robot won't move
+        # Penalize if average amplitude < 0.10 rad
+        avg_amplitude = self._cpg_amplitudes.mean(dim=1)
+        amplitude_penalty = torch.where(
+            avg_amplitude < 0.10,
+            (avg_amplitude - 0.10) * 20.0,  # Penalty for tiny oscillations
+            torch.zeros_like(avg_amplitude)  # No penalty if amplitude is good
+        )
+        
+        # ============================================
+        # COMBINE REWARDS
         # ============================================
         rewards = {
-            # Existing rewards
-            "track_lin_vel_xy_exp": lin_vel_error_mapped * self.cfg.lin_vel_reward_scale * self.step_dt,
-            "track_ang_vel_z_exp": yaw_rate_error_mapped * self.cfg.yaw_rate_reward_scale * self.step_dt,
-            "lin_vel_z_l2": z_vel_error * self.cfg.z_vel_reward_scale * self.step_dt,
-            "ang_vel_xy_l2": ang_vel_error * self.cfg.ang_vel_reward_scale * self.step_dt,
-            "dof_torques_l2": joint_torques * self.cfg.joint_torque_reward_scale * self.step_dt,
-            "dof_acc_l2": joint_accel * self.cfg.joint_accel_reward_scale * self.step_dt,
-            "action_rate_l2": action_rate * self.cfg.action_rate_reward_scale * self.step_dt,
-            "flat_orientation_l2": flat_orientation * self.cfg.flat_orientation_reward_scale * self.step_dt,
-            # NEW: CPG rewards
-            "frequency_change": frequency_change * self.cfg.frequency_change_reward_scale * self.step_dt,
-            "gait_symmetry": gait_symmetry * self.cfg.gait_symmetry_reward_scale * self.step_dt,
-            "contact_timing": contact_timing * self.cfg.contact_timing_reward_scale * self.step_dt,
-            "foot_slip": foot_slip * self.cfg.foot_slip_reward_scale * self.step_dt,
-            "body_height": height_error * (-10.0) * self.step_dt,  # Strong penalty for wrong height
-
+            # Main objectives (INCREASED scales)
+            "track_lin_vel_xy_exp": lin_vel_error_mapped * 25.0 * self.step_dt,  # ← Was 15.0
+            "track_ang_vel_z_exp": yaw_rate_error_mapped * 0.5 * self.step_dt,
+            
+            # Stability (unchanged)
+            "lin_vel_z_l2": z_vel_error * -2.0 * self.step_dt,
+            "ang_vel_xy_l2": ang_vel_error * -0.05 * self.step_dt,
+            "dof_torques_l2": joint_torques * -2e-5 * self.step_dt,
+            "dof_acc_l2": joint_accel * -2.5e-7 * self.step_dt,
+            "action_rate_l2": action_rate * -0.01 * self.step_dt,
+            "flat_orientation_l2": flat_orientation * -5.0 * self.step_dt,
+            
+            # CPG (unchanged)
+            "frequency_change": frequency_change * -0.1 * self.step_dt,
+            "gait_symmetry": gait_symmetry * 0.5 * self.step_dt,
+            "contact_timing": contact_timing * 0.5 * self.step_dt,  # ← Reduced from 1.0
+            "foot_slip": foot_slip * -0.5 * self.step_dt,
+            
+            # Height (MUCH SOFTER!)
+            "body_height": height_error * -1.0 * self.step_dt,  # ← Was -10.0!
+            
+            # ✅ NEW: Anti-standing rewards
+            "movement_bonus": movement_bonus * self.step_dt,
+            "amplitude_penalty": amplitude_penalty * self.step_dt,
         }
         
-        # Sum all rewards
         reward = torch.sum(torch.stack(list(rewards.values())), dim=0)
         
-        # Logging
         for key, value in rewards.items():
             self._episode_sums[key] += value
-            
+        
         return reward
-
     
 
 
@@ -538,17 +531,17 @@ class SpiderbotEnv(DirectRLEnv):
 
         cmds = torch.zeros_like(self._commands[env_ids])
 
-        if current_iteration < 100:
+        if current_iteration < 700:
             # ============================================
             # PHASE 1: Standing with tiny CPG oscillations (iter 0-100)
             # ============================================
             # Goal: Learn to balance and maintain upright posture
             # CPG will produce minimal oscillations to find stable stance
-            cmds[:, 0].uniform_(0.00, 0.05)   # Almost zero forward: 0-0.05 m/s
+            cmds[:, 0].uniform_(0.15, 0.35)   # Almost zero forward: 0-0.05 m/s
             cmds[:, 1] = 0.0                  # No lateral movement
-            cmds[:, 2].uniform_(-0.05, 0.05)  # Minimal turning: ±0.05 rad/s
+            cmds[:, 2].uniform_(-0.2, 0.2)  # Minimal turning: ±0.2 rad/s
             
-        elif current_iteration < 200:
+        elif current_iteration < 800:
             # ============================================
             # PHASE 2: Very slow walking (iter 100-200)
             # ============================================
@@ -558,7 +551,7 @@ class SpiderbotEnv(DirectRLEnv):
             cmds[:, 1] = 0.0                  # No lateral movement
             cmds[:, 2].uniform_(-0.1, 0.1)    # Small turning: ±0.1 rad/s
             
-        elif current_iteration < 400:
+        elif current_iteration < 900:
             # ============================================
             # PHASE 3: Slow to normal walking (iter 200-400)
             # ============================================
@@ -568,7 +561,7 @@ class SpiderbotEnv(DirectRLEnv):
             cmds[:, 1] = 0.0                  # No lateral movement
             cmds[:, 2].uniform_(-0.15, 0.15)  # Medium turning: ±0.15 rad/s
             
-        elif current_iteration < 700:
+        elif current_iteration < 1000:
             # ============================================
             # PHASE 4: Normal walking (iter 400-700)
             # ============================================

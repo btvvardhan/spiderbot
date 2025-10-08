@@ -230,7 +230,7 @@ class SpiderbotEnvCfg(DirectRLEnvCfg):
     # REWARD SCALES
     # ============================================
     # Existing rewards (for velocity tracking and stability)
-    lin_vel_reward_scale = 5.0
+    lin_vel_reward_scale = 15.0
     yaw_rate_reward_scale = 0.5
     z_vel_reward_scale = -2.0
     ang_vel_reward_scale = -0.05
