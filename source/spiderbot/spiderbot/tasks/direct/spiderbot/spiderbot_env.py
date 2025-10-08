@@ -515,27 +515,73 @@ class SpiderbotEnv(DirectRLEnv):
 
 
 
-        current_iteration = self.episode_length_buf.max().item() // 1000  # Rough estimate
-        
+# ============================================
+# CURRICULUM: Standing → Slow Walk → Fast Walk
+# ============================================
+        # current_iteration is based on episode count, rough estimate
+        current_iteration = self.episode_length_buf.max().item() // 1000
+
         cmds = torch.zeros_like(self._commands[env_ids])
-        
-        if current_iteration < 200:
-            # Phase 1: Very slow walking (natural CPG speeds)
-            cmds[:, 0].uniform_(0.05, 0.15)  # Slow forward: 0.05-0.15 m/s
-            cmds[:, 1] = 0.0                  # No lateral
-            cmds[:, 2].uniform_(-0.1, 0.1)    # Tiny turning
-        elif current_iteration < 500:
-            # Phase 2: Normal walking
-            cmds[:, 0].uniform_(0.15, 0.35)  # Normal forward: 0.15-0.35 m/s
-            cmds[:, 1] = 0.0                  # No lateral
-            cmds[:, 2].uniform_(-0.2, 0.2)    # Small turning
+
+        if current_iteration < 100:
+            # ============================================
+            # PHASE 1: Standing with tiny CPG oscillations (iter 0-100)
+            # ============================================
+            # Goal: Learn to balance and maintain upright posture
+            # CPG will produce minimal oscillations to find stable stance
+            cmds[:, 0].uniform_(0.00, 0.05)   # Almost zero forward: 0-0.05 m/s
+            cmds[:, 1] = 0.0                  # No lateral movement
+            cmds[:, 2].uniform_(-0.05, 0.05)  # Minimal turning: ±0.05 rad/s
+            
+        elif current_iteration < 200:
+            # ============================================
+            # PHASE 2: Very slow walking (iter 100-200)
+            # ============================================
+            # Goal: Learn basic leg coordination at safe speeds
+            # CPG starts generating small rhythmic movements
+            cmds[:, 0].uniform_(0.05, 0.15)   # Very slow forward: 0.05-0.15 m/s
+            cmds[:, 1] = 0.0                  # No lateral movement
+            cmds[:, 2].uniform_(-0.1, 0.1)    # Small turning: ±0.1 rad/s
+            
+        elif current_iteration < 400:
+            # ============================================
+            # PHASE 3: Slow to normal walking (iter 200-400)
+            # ============================================
+            # Goal: Increase speed while maintaining coordination
+            # Natural gaits should start emerging
+            cmds[:, 0].uniform_(0.10, 0.30)   # Slow-normal forward: 0.10-0.30 m/s
+            cmds[:, 1] = 0.0                  # No lateral movement
+            cmds[:, 2].uniform_(-0.15, 0.15)  # Medium turning: ±0.15 rad/s
+            
+        elif current_iteration < 700:
+            # ============================================
+            # PHASE 4: Normal walking (iter 400-700)
+            # ============================================
+            # Goal: Master standard walking speeds
+            cmds[:, 0].uniform_(0.15, 0.40)   # Normal-fast forward: 0.15-0.40 m/s
+            cmds[:, 1] = 0.0                  # No lateral movement
+            cmds[:, 2].uniform_(-0.2, 0.2)    # Normal turning: ±0.2 rad/s
+            
         else:
-            # Phase 3: Fast walking + omnidirectional
-            cmds[:, 0].uniform_(0.15, 0.50)   # Fast forward
-            cmds[:, 1].uniform_(-0.15, 0.15)  # Add lateral movement
-            cmds[:, 2].uniform_(-0.3, 0.3)    # More turning
-        
+            # ============================================
+            # PHASE 5: Fast + omnidirectional (iter 700+)
+            # ============================================
+            # Goal: Full locomotion capability in all directions
+            cmds[:, 0].uniform_(0.15, 0.50)   # Fast forward: 0.15-0.50 m/s
+            cmds[:, 1].uniform_(-0.20, 0.20)  # Add lateral movement
+            cmds[:, 2].uniform_(-0.3, 0.3)    # Full turning range
+
         self._commands[env_ids] = cmds
+
+        # ✅ Optional: Print phase changes so you know when curriculum advances
+        if current_iteration in [100, 200, 400, 700]:
+            phase = {100: "PHASE 2", 200: "PHASE 3", 400: "PHASE 4", 700: "PHASE 5"}[current_iteration]
+            print(f"\n{'='*80}")
+            print(f"🎯 CURRICULUM ADVANCED TO {phase} at iteration ~{current_iteration}")
+            print(f"{'='*80}\n")
+
+
+
             
         # ============================================
         # RESET ROBOT STATE IN SIMULATION
