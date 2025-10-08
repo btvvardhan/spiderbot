@@ -193,7 +193,7 @@ class SpiderbotEnvCfg(DirectRLEnvCfg):
 
         # Initial state
         init_state=ArticulationCfg.InitialStateCfg(
-            pos=(0.0, 0.0, 0.22),   # Spawn slightly above ground
+            pos=(0.0, 0.0, 0.15),   # Spawn slightly above ground
             rot=(1.0, 0.0, 0.0, 0.0),  # Quaternion (w, x, y, z)
             joint_pos={".*": 0.0},  # All joints at default position
             joint_vel={".*": 0.0},
