@@ -446,28 +446,28 @@ class SpiderbotEnv(DirectRLEnv):
 
 
 
-    current_iteration = self.episode_length_buf.max().item() // 1000  # Rough estimate
-    
-    cmds = torch.zeros_like(self._commands[env_ids])
-    
-    if current_iteration < 200:
-        # Phase 1: Very slow walking (natural CPG speeds)
-        cmds[:, 0].uniform_(0.05, 0.15)  # Slow forward: 0.05-0.15 m/s
-        cmds[:, 1] = 0.0                  # No lateral
-        cmds[:, 2].uniform_(-0.1, 0.1)    # Tiny turning
-    elif current_iteration < 500:
-        # Phase 2: Normal walking
-        cmds[:, 0].uniform_(0.15, 0.35)  # Normal forward: 0.15-0.35 m/s
-        cmds[:, 1] = 0.0                  # No lateral
-        cmds[:, 2].uniform_(-0.2, 0.2)    # Small turning
-    else:
-        # Phase 3: Fast walking + omnidirectional
-        cmds[:, 0].uniform_(0.15, 0.50)   # Fast forward
-        cmds[:, 1].uniform_(-0.15, 0.15)  # Add lateral movement
-        cmds[:, 2].uniform_(-0.3, 0.3)    # More turning
-    
-    self._commands[env_ids] = cmds
+        current_iteration = self.episode_length_buf.max().item() // 1000  # Rough estimate
         
+        cmds = torch.zeros_like(self._commands[env_ids])
+        
+        if current_iteration < 200:
+            # Phase 1: Very slow walking (natural CPG speeds)
+            cmds[:, 0].uniform_(0.05, 0.15)  # Slow forward: 0.05-0.15 m/s
+            cmds[:, 1] = 0.0                  # No lateral
+            cmds[:, 2].uniform_(-0.1, 0.1)    # Tiny turning
+        elif current_iteration < 500:
+            # Phase 2: Normal walking
+            cmds[:, 0].uniform_(0.15, 0.35)  # Normal forward: 0.15-0.35 m/s
+            cmds[:, 1] = 0.0                  # No lateral
+            cmds[:, 2].uniform_(-0.2, 0.2)    # Small turning
+        else:
+            # Phase 3: Fast walking + omnidirectional
+            cmds[:, 0].uniform_(0.15, 0.50)   # Fast forward
+            cmds[:, 1].uniform_(-0.15, 0.15)  # Add lateral movement
+            cmds[:, 2].uniform_(-0.3, 0.3)    # More turning
+        
+        self._commands[env_ids] = cmds
+            
         # ============================================
         # RESET ROBOT STATE IN SIMULATION
         # ============================================
