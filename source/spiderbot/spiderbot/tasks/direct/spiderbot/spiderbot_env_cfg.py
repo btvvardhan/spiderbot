@@ -95,7 +95,7 @@ class SpiderbotEnvCfg(DirectRLEnvCfg):
     action_scale = 1.0  # Keep at 1.0 since we do custom scaling per parameter type
     
     # Observation space (unchanged)
-    observation_space = 48
+    observation_space = 53
     state_space = 0
 
     # ============================================
