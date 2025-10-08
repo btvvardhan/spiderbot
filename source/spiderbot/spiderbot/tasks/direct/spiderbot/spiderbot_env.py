@@ -384,10 +384,18 @@ class SpiderbotEnv(DirectRLEnv):
         # Check if die bodies (upper leg links) touched ground
         died = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         net_contact_forces = self._contact_sensor.data.net_forces_w_history
-        died = torch.any(
-            torch.max(torch.norm(net_contact_forces[:, :, self._die_body_ids], dim=-1), dim=1)[0] > 1.0, 
+        
+        # Get maximum contact force over history for die bodies
+        max_contact_forces = torch.max(
+            torch.norm(net_contact_forces[:, :, self._die_body_ids], dim=-1), 
             dim=1
-        )
+        )[0]  # Shape: [num_envs, num_die_bodies]
+        
+        # ✅ CHANGED: Threshold from 1.0 → 15.0 N
+        # 15 N = ~1.5 kg equivalent weight (very gentle impact)
+        # This allows normal walking dynamics without triggering failure
+        died = torch.any(max_contact_forces > 15.0, dim=1)
+        
         
         return died, time_out
 
@@ -416,23 +424,70 @@ class SpiderbotEnv(DirectRLEnv):
                 self.episode_length_buf, 
                 high=int(self.max_episode_length)
             )
-        
-        # Reset actions
-        self._actions[env_ids] = 0.0
-        self._previous_actions[env_ids] = 0.0
-        
-        # ============================================
-        # RESET CPG STATE
-        # ============================================
-        # Important: CPG oscillators need to be reset to avoid
-        # carrying over state from previous episode
+    #-------------------------------------
         self._cpg.reset(env_ids)
         
-        # Reset CPG parameter tracking
-        self._cpg_frequency[env_ids] = 2.0  # Start at moderate frequency
-        self._cpg_amplitudes[env_ids] = 0.2  # Start at moderate amplitude
-        self._cpg_phases[env_ids] = 0.0
-        self._previous_frequency[env_ids] = 2.0
+        # ✅ INITIALIZE CPG PARAMETERS WITH GOOD DEFAULTS
+        # Instead of letting RL start from random, give it a reasonable starting point
+        # Real spiders are born with functional CPG parameters!
+        
+        # Initialize with slow, stable walking parameters
+        self._cpg_frequency[env_ids] = 2.5  # ~0.4 Hz - slow walking frequency
+        self._cpg_amplitudes[env_ids] = 0.15  # Small amplitude - conservative movements
+        
+        # Initialize with tetrapod phase pattern (already coded in SpiderCPG)
+        # Legs: FL, FR, BL, BR
+        # Tetrapod: FL+BR together (0), FR+BL opposite (π)
+        self._cpg_phases[env_ids, 0] = 0.0      # Front-Left
+        self._cpg_phases[env_ids, 1] = 3.14159  # Front-Right (opposite phase)
+        self._cpg_phases[env_ids, 2] = 3.14159  # Back-Left (opposite phase)
+        self._cpg_phases[env_ids, 3] = 0.0      # Back-Right
+        
+        self._previous_frequency[env_ids] = 2.5
+        
+        # ✅ ALSO: Let actions start near these good values, not random
+        # This prevents the first action from being wild
+        # Actions will be in range [-1, 1], we want them to start near the "good" zone
+        
+        # For frequency: we want 2.5 rad/s, which maps to action ≈ 0.0
+        # freq range: [1.0, 6.0], so 2.5 is in the middle
+        # action = -1 + 2*(freq - freq_min)/(freq_max - freq_min)
+        # action = -1 + 2*(2.5 - 1.0)/(6.0 - 1.0) = -1 + 2*0.3 = -0.4
+        self._actions[env_ids, 0] = -0.4  # Initialize frequency action
+        
+        # For amplitudes: we want 0.15 rad, which maps to action ≈ -0.4
+        # amp range: [0.0, 0.5], so 0.15 = 30% of range
+        # action = -1 + 2*0.3 = -0.4
+        self._actions[env_ids, 1:13] = -0.4  # Initialize amplitude actions
+        
+        # For phases: tetrapod pattern
+        # phase range: [-π, π], tetrapod needs 0 and π
+        # For 0: action = -1 + 2*(0 - (-π))/(π - (-π)) = -1 + 2*0.5 = 0.0
+        # For π: action = -1 + 2*(π - (-π))/(π - (-π)) = -1 + 2*1.0 = 1.0
+        self._actions[env_ids, 13] = 0.0   # FL: phase 0
+        self._actions[env_ids, 14] = 1.0   # FR: phase π
+        self._actions[env_ids, 15] = 1.0   # BL: phase π
+        self._actions[env_ids, 16] = 0.0   # BR: phase 0
+        
+        self._previous_actions[env_ids] = self._actions[env_ids].clone()
+
+        #---------------------------------------
+        # # Reset actions
+        # self._actions[env_ids] = 0.0
+        # self._previous_actions[env_ids] = 0.0
+        
+        # # ============================================
+        # # RESET CPG STATE
+        # # ============================================
+        # # Important: CPG oscillators need to be reset to avoid
+        # # carrying over state from previous episode
+        # self._cpg.reset(env_ids)
+        
+        # # Reset CPG parameter tracking
+        # self._cpg_frequency[env_ids] = 2.0  # Start at moderate frequency
+        # self._cpg_amplitudes[env_ids] = 0.2  # Start at moderate amplitude
+        # self._cpg_phases[env_ids] = 0.0
+        # self._previous_frequency[env_ids] = 2.0
         
         # # ============================================
         # # SAMPLE NEW VELOCITY COMMANDS
