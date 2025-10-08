@@ -367,37 +367,47 @@ class SpiderbotEnv(DirectRLEnv):
             
         return reward
 
+    
+
+
+
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
-        """
-        Determine which episodes should terminate.
+        """Determine which episodes should terminate."""
         
-        Termination conditions:
-        1. Timeout: Episode reached max length
-        2. Failure: Body parts that shouldn't touch ground made contact
-        
-        Returns:
-            died: [num_envs] - True if robot failed
-            time_out: [num_envs] - True if episode timed out
-        """
+        # Check timeout
         time_out = self.episode_length_buf >= self.max_episode_length - 1
         
-        # Check if die bodies (upper leg links) touched ground
+        # Check contact forces
         died = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         net_contact_forces = self._contact_sensor.data.net_forces_w_history
         
-        # Get maximum contact force over history for die bodies
-        max_contact_forces = torch.max(
-            torch.norm(net_contact_forces[:, :, self._die_body_ids], dim=-1), 
-            dim=1
-        )[0]  # Shape: [num_envs, num_die_bodies]
+        contact_norms = torch.norm(net_contact_forces[:, :, self._die_body_ids], dim=-1)
+        max_contact = torch.max(contact_norms, dim=1)[0]
+        died = torch.any(max_contact > 1000.0, dim=1)
         
-        # ✅ CHANGED: Threshold from 1.0 → 15.0 N
-        # 15 N = ~1.5 kg equivalent weight (very gentle impact)
-        # This allows normal walking dynamics without triggering failure
-        died = torch.any(max_contact_forces > 15.0, dim=1)
-        
+        # ✅ COMPREHENSIVE DEBUG
+        if self.common_step_counter % 100 == 0:
+            print(f"\n{'='*80}")
+            print(f"🔍 DETAILED DEBUG at step {self.common_step_counter}")
+            print(f"{'='*80}")
+            print(f"Max episode length setting: {self.max_episode_length}")
+            print(f"Episode buffer values [0:4]: {self.episode_length_buf[:4].cpu().numpy()}")
+            print(f"Robot heights [0:4]: {self._robot.data.root_pos_w[:4, 2].cpu().numpy()}")
+            print(f"Max contact forces [0:4]: {max_contact[:4].cpu().numpy()}")
+            print(f"")
+            print(f"Timeout check (>= {self.max_episode_length - 1}):")
+            print(f"  time_out [0:4]: {time_out[:4].cpu().numpy()}")
+            print(f"  Count timing out: {time_out.sum().item()} / {self.num_envs}")
+            print(f"")
+            print(f"Died check (contact > 1.0):")
+            print(f"  died [0:4]: {died[:4].cpu().numpy()}")
+            print(f"  Count died: {died.sum().item()} / {self.num_envs}")
+            print(f"")
+            print(f"Total resets this step: {(time_out | died).sum().item()} / {self.num_envs}")
+            print(f"{'='*80}\n")
         
         return died, time_out
+
 
     def _reset_idx(self, env_ids: torch.Tensor | None):
         """
@@ -411,19 +421,23 @@ class SpiderbotEnv(DirectRLEnv):
         Args:
             env_ids: Indices of environments to reset
         """
+        # ✅ DEBUG: See when and why resets happen
+        if env_ids is not None and len(env_ids) > 0:
+            print(f"⚠️  RESET called for {len(env_ids)} environments")
+            print(f"   First 4 env IDs: {env_ids[:4].cpu().numpy() if len(env_ids) >= 4 else env_ids.cpu().numpy()}")
+        
         if env_ids is None or len(env_ids) == self.num_envs:
             env_ids = self._robot._ALL_INDICES
-            
+            print(f"🔄 FULL RESET of ALL {self.num_envs} environments")
+        
+
         # Reset robot articulation
         self._robot.reset(env_ids)
         super()._reset_idx(env_ids)
         
         if len(env_ids) == self.num_envs:
-            # Stagger resets to avoid training spikes
-            self.episode_length_buf[:] = torch.randint_like(
-                self.episode_length_buf, 
-                high=int(self.max_episode_length)
-            )
+    # Initialize all episodes to length 0 (fresh start)
+            self.episode_length_buf[:] = 0
     #-------------------------------------
         self._cpg.reset(env_ids)
         
