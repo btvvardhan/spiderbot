@@ -50,7 +50,7 @@ class SpiderbotEnvCfg(DirectRLEnvCfg):
     # env
     episode_length_s = 20.0
     decimation = 4
-    action_scale = 0.25
+    action_scale = 1
     action_space = 12
     observation_space = 48
     state_space = 0
@@ -122,8 +122,8 @@ class SpiderbotEnvCfg(DirectRLEnvCfg):
                     r"Revolute_112", r"Revolute_115", r"Revolute_118", r"Revolute_121",
                 ],
                 # start conservative so it doesn’t flop on step 1
-                stiffness=1500.0,
-                damping=30.0,
+                stiffness=100.0,
+                damping=15.0,
                 effort_limit_sim=40.0,
                 velocity_limit_sim=8.0,
             )

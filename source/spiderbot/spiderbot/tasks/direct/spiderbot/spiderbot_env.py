@@ -159,23 +159,23 @@ class SpiderbotEnv(DirectRLEnv):
         # Sample new commands
         #self._commands[env_ids] = torch.zeros_like(self._commands[env_ids]).uniform_(-1.0, 1.0)
         # Phase 1: tiny commands (almost stand-still)
-        vx_min, vx_max   = -0.02, 0.02   # forward/back
-        vy_min, vy_max   = -0.02, 0.02   # left/right
-        yaw_min, yaw_max = -0.02, 0.02   # turn rate
+        # vx_min, vx_max   = -0.0, 0.0   # forward/back
+        # vy_min, vy_max   = -0.0, 0.0   # left/right
+        # yaw_min, yaw_max = -0.0, 0.0   # turn rate
 
-        cmds = torch.zeros_like(self._commands[env_ids])
-        cmds[:, 0].uniform_(vx_min,  vx_max)   # vx
-        cmds[:, 1].uniform_(vy_min,  vy_max)   # vy
-        cmds[:, 2].uniform_(yaw_min, yaw_max)  # yaw
-        self._commands[env_ids] = cmds
+        # cmds = torch.zeros_like(self._commands[env_ids])
+        # cmds[:, 0].uniform_(vx_min,  vx_max)   # vx
+        # cmds[:, 1].uniform_(vy_min,  vy_max)   # vy
+        # cmds[:, 2].uniform_(yaw_min, yaw_max)  # yaw
+        # self._commands[env_ids] = cmds
 
 
         # Sample new commands for walking (vx forward, small yaw)
-        # cmds = torch.zeros_like(self._commands[env_ids])
-        # cmds[:, 0].uniform_(0.15, 0.35)  # vx in m/s
-        # cmds[:, 1] = 0.0                 # no lateral
-        # cmds[:, 2].uniform_(-0.2, 0.2)   # small turning allowed (optional)
-        # self._commands[env_ids] = cmds
+        cmds = torch.zeros_like(self._commands[env_ids])
+        cmds[:, 0].uniform_(0.15, 0.35)  # vx in m/s
+        cmds[:, 1] = 0.0                 # no lateral
+        cmds[:, 2].uniform_(-0.2, 0.2)   # small turning allowed (optional)
+        self._commands[env_ids] = cmds
 
 
         # Reset robot state
