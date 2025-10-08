@@ -128,7 +128,7 @@ class SpiderbotEnv(DirectRLEnv):
                 "gait_symmetry",
                 "contact_timing",
                 "foot_slip",
-                "height_reward", 
+                "body_height",  # ← NEW: Body height reward
             ]
         }
 
@@ -231,6 +231,8 @@ class SpiderbotEnv(DirectRLEnv):
             Dictionary with "policy" key containing observation tensor
         """
         self._previous_actions = self._actions.clone()
+        base_height = self._robot.data.root_pos_w[:, 2:3]  # Shape: (num_envs, 1)
+
         
         obs = torch.cat(
             [
@@ -240,6 +242,7 @@ class SpiderbotEnv(DirectRLEnv):
                     self._robot.data.root_ang_vel_b,       # [3] - angular velocity in body frame
                     self._robot.data.projected_gravity_b,  # [3] - gravity direction (for orientation)
                     self._commands,                        # [3] - desired velocities
+                    base_height,                        # [1] - body height
                     self._robot.data.joint_pos - self._robot.data.default_joint_pos,  # [12] - joint offsets
                     self._robot.data.joint_vel,            # [12] - joint velocities
                     self._actions,                         # [17] - previous CPG parameters
@@ -248,7 +251,7 @@ class SpiderbotEnv(DirectRLEnv):
             ],
             dim=-1,
         )
-        # Total: 3+3+3+3+12+12+17 = 53... wait, cfg says 48?
+        # Total: 3+3+3+3+12+12+17 = 53
         # You may need to adjust observation_space in cfg or remove some observations
         
         observations = {"policy": obs}
@@ -338,14 +341,15 @@ class SpiderbotEnv(DirectRLEnv):
         # This requires foot body velocities - may need to add to observations
         # For now, use a placeholder (you can implement later)
         foot_slip = torch.zeros(self.num_envs, device=self.device)
-        
+        # ============================================
+        # NEW: BODY HEIGHT REWARD
+        # ============================================
+        # Penalize low body height (prevents crawling on belly)
+        # Target height: 0.15m (matches initial spawn height)
         target_height = 0.15
-        body_height = self._robot.data.root_pos_w[:, 2]
+        current_height = self._robot.data.root_pos_w[:, 2]  # Z-coordinate of base
+        height_error = torch.square(current_height - target_height)
 
-        # Exponential reward: peaks at 0.12m, drops off quickly below 0.08m
-        height_error = torch.square(body_height - target_height)
-        height_reward = torch.exp(-height_error / 0.01)  # Sharp penalty for deviation
-        
         
         # ============================================
         # COMBINE ALL REWARDS
@@ -365,7 +369,7 @@ class SpiderbotEnv(DirectRLEnv):
             "gait_symmetry": gait_symmetry * self.cfg.gait_symmetry_reward_scale * self.step_dt,
             "contact_timing": contact_timing * self.cfg.contact_timing_reward_scale * self.step_dt,
             "foot_slip": foot_slip * self.cfg.foot_slip_reward_scale * self.step_dt,
-            "height_reward": height_reward * 3.0 * self.step_dt,  # Scale: 3.0 (strong incentive)
+            "body_height": height_error * (-10.0) * self.step_dt,  # Strong penalty for wrong height
 
         }
         
@@ -378,48 +382,46 @@ class SpiderbotEnv(DirectRLEnv):
             
         return reward
 
-        
+    
+
+
+
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
         """Determine which episodes should terminate."""
         
+        # Check timeout
         time_out = self.episode_length_buf >= self.max_episode_length - 1
+        
+        # Check contact forces
         died = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
-        
-        # ✅ GRACE PERIOD: Don't check failures for first 50 steps
-        # This allows robot to settle from spawn and CPG to stabilize
-        grace_period = self.episode_length_buf < 10
-        
-        # Check 1: Contact forces
         net_contact_forces = self._contact_sensor.data.net_forces_w_history
+        
         contact_norms = torch.norm(net_contact_forces[:, :, self._die_body_ids], dim=-1)
         max_contact = torch.max(contact_norms, dim=1)[0]
-        contact_died = torch.any(max_contact > 1500.0, dim=1) & ~grace_period
+        died = torch.any(max_contact > 1000.0, dim=1)
         
-        # ✅ Check 2: Height collapse (RELAXED threshold)
-        # Original spawn: 0.22m
-        # Relaxed threshold: 0.08m (allows significant sag but prevents belly crawl)
-        body_height = self._robot.data.root_pos_w[:, 2]
-        height_died = (body_height < 0.05)& ~grace_period   # Much more lenient!
-        
-        # ✅ Check 3: Extreme tilt (only check severe flips)
-        gravity_z = self._robot.data.projected_gravity_b[:, 2]
-        tilt_died = (gravity_z > -0.1) & ~grace_period  # Very lenient (nearly upside down)
-        
-        # Combine all failure conditions
-        died = contact_died | height_died | tilt_died
-        
-        # Debug
-        if self.common_step_counter % 200 == 0:
-            print(f"\n🔍 Failure analysis:")
-            print(f"  In grace period: {grace_period.sum().item()}/{self.num_envs}")
-            print(f"  Contact died: {contact_died.sum().item()}/{self.num_envs}")
-            print(f"  Height died: {height_died.sum().item()}/{self.num_envs}")
-            print(f"  Tilt died: {tilt_died.sum().item()}/{self.num_envs}")
-            print(f"  Heights [0:4]: {body_height[:4].cpu().numpy()}")
-            print(f"  Gravity_z [0:4]: {gravity_z[:4].cpu().numpy()}")
+        # ✅ COMPREHENSIVE DEBUG
+        if self.common_step_counter % 100 == 0:
+            print(f"\n{'='*80}")
+            print(f"🔍 DETAILED DEBUG at step {self.common_step_counter}")
+            print(f"{'='*80}")
+            print(f"Max episode length setting: {self.max_episode_length}")
+            print(f"Episode buffer values [0:4]: {self.episode_length_buf[:4].cpu().numpy()}")
+            print(f"Robot heights [0:4]: {self._robot.data.root_pos_w[:4, 2].cpu().numpy()}")
+            print(f"Max contact forces [0:4]: {max_contact[:4].cpu().numpy()}")
+            print(f"")
+            print(f"Timeout check (>= {self.max_episode_length - 1}):")
+            print(f"  time_out [0:4]: {time_out[:4].cpu().numpy()}")
+            print(f"  Count timing out: {time_out.sum().item()} / {self.num_envs}")
+            print(f"")
+            print(f"Died check (contact > 1.0):")
+            print(f"  died [0:4]: {died[:4].cpu().numpy()}")
+            print(f"  Count died: {died.sum().item()} / {self.num_envs}")
+            print(f"")
+            print(f"Total resets this step: {(time_out | died).sum().item()} / {self.num_envs}")
+            print(f"{'='*80}\n")
         
         return died, time_out
-
 
 
     def _reset_idx(self, env_ids: torch.Tensor | None):
@@ -434,13 +436,14 @@ class SpiderbotEnv(DirectRLEnv):
         Args:
             env_ids: Indices of environments to reset
         """
-        # ✅ DEBUG: See when and why resets happen
-        if env_ids is not None and len(env_ids) > 0:
-            print(f"⚠️  RESET called for {len(env_ids)} environments")
+        # # ✅ DEBUG: See when and why resets happen
+        # if env_ids is not None and len(env_ids) > 0:
+        #     print(f"⚠️  RESET called for {len(env_ids)} environments")
+        #     print(f"   First 4 env IDs: {env_ids[:4].cpu().numpy() if len(env_ids) >= 4 else env_ids.cpu().numpy()}")
         
-        if env_ids is None or len(env_ids) == self.num_envs:
-            env_ids = self._robot._ALL_INDICES
-            print(f"🔄 FULL RESET of ALL {self.num_envs} environments")
+        # if env_ids is None or len(env_ids) == self.num_envs:
+        #     env_ids = self._robot._ALL_INDICES
+        #     print(f"🔄 FULL RESET of ALL {self.num_envs} environments")
         
 
         # Reset robot articulation

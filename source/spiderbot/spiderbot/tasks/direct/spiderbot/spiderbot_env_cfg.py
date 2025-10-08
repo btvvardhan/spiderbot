@@ -95,7 +95,7 @@ class SpiderbotEnvCfg(DirectRLEnvCfg):
     action_scale = 1.0  # Keep at 1.0 since we do custom scaling per parameter type
     
     # Observation space (unchanged)
-    observation_space = 53
+    observation_space = 54
     state_space = 0
 
     # ============================================
@@ -195,9 +195,35 @@ class SpiderbotEnvCfg(DirectRLEnvCfg):
         init_state=ArticulationCfg.InitialStateCfg(
             pos=(0.0, 0.0, 0.15),   # Spawn slightly above ground
             rot=(1.0, 0.0, 0.0, 0.0),  # Quaternion (w, x, y, z)
-            joint_pos={".*": 0.0},  # All joints at default position
+
+
+            joint_pos={
+                # Leg 1 (Front-Left): Hip out, Knee bent, Ankle down
+                "Revolute_110": 0.5,   # Hip: spread outward
+                "Revolute_111": 0.8,  # Knee: bend downward
+                "Revolute_112": -0.3,   # Ankle: adjust ground contact
+                
+                # Leg 2 (Front-Right): Mirror of Leg 1
+                "Revolute_113": -0.5,  # Hip: spread outward (opposite side)
+                "Revolute_114": 0.8,  # Knee: bend downward
+                "Revolute_115": -0.3,   # Ankle: adjust ground contact
+                
+                # Leg 3 (Back-Left): Similar to Front-Left
+                "Revolute_116": 0.5,   # Hip: spread outward
+                "Revolute_117": 0.8,  # Knee: bend downward
+                "Revolute_118": -0.3,   # Ankle: adjust ground contact
+                
+                # Leg 4 (Back-Right): Mirror of Leg 3
+                "Revolute_119": -0.5,  # Hip: spread outward (opposite side)
+                "Revolute_120": 0.8,  # Knee: bend downward
+                "Revolute_121": -0.3,   # Ankle: adjust ground contact
+            },
             joint_vel={".*": 0.0},
         ),
+        
+
+
+        
     )
 
     # ============================================
