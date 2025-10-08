@@ -95,17 +95,17 @@ class SpiderbotEnv(DirectRLEnv):
             device=self.device
         )
         
-        # ============================================
+
+                # ============================================
         # FOOT (END-EFFECTOR) TRACKING
         # ============================================
-        # Track foot positions for slip detection and contact timing rewards
-        # Assuming feet are the last link of each leg chain
-        # You may need to adjust these body names to match your URDF/USD
+        # Feet are the last link (arm_c) of each leg chain
+        # Leg structure: arm_a (hip) → arm_b (knee) → arm_c (foot)
         self._foot_ids, _ = self._contact_sensor.find_bodies([
-            "arm_a_1_3",  # Front-Left foot
-            "arm_a_2_3",  # Front-Right foot  
-            "arm_a_3_3",  # Back-Left foot
-            "arm_a_4_3",  # Back-Right foot
+            "arm_c_1_1",  # Leg 1 foot (last link)
+            "arm_c_2_1",  # Leg 2 foot (last link)
+            "arm_c_3_1",  # Leg 3 foot (last link)
+            "arm_c_4_1",  # Leg 4 foot (last link)
         ])
 
         # ============================================
@@ -318,8 +318,9 @@ class SpiderbotEnv(DirectRLEnv):
         # Assuming leg order: FL, FR, BL, BR (each with 3 joints)
         left_amps = self._cpg_amplitudes[:, [0,1,2, 6,7,8]]   # FL + BL
         right_amps = self._cpg_amplitudes[:, [3,4,5, 9,10,11]]  # FR + BR
-        gait_symmetry = torch.sum(torch.square(left_amps.mean(dim=1) - right_amps.mean(dim=1)))
-        
+        #gait_symmetry = torch.sum(torch.square(left_amps.mean(dim=1) - right_amps.mean(dim=1)))
+        gait_symmetry = torch.square(left_amps.mean(dim=1) - right_amps.mean(dim=1))
+
         # 3. Contact timing reward
         # Feet should touch ground when CPG is in stance phase
         # This requires computing expected contact from CPG phase
@@ -433,15 +434,39 @@ class SpiderbotEnv(DirectRLEnv):
         self._cpg_phases[env_ids] = 0.0
         self._previous_frequency[env_ids] = 2.0
         
-        # ============================================
-        # SAMPLE NEW VELOCITY COMMANDS
-        # ============================================
-        # Give robot a new task each episode
-        cmds = torch.zeros_like(self._commands[env_ids])
-        cmds[:, 0].uniform_(0.15, 0.35)  # Forward velocity: 0.15-0.35 m/s
-        cmds[:, 1] = 0.0                 # No lateral movement
-        cmds[:, 2].uniform_(-0.2, 0.2)   # Small turning: ±0.2 rad/s
-        self._commands[env_ids] = cmds
+        # # ============================================
+        # # SAMPLE NEW VELOCITY COMMANDS
+        # # ============================================
+        # # Give robot a new task each episode
+        # cmds = torch.zeros_like(self._commands[env_ids])
+        # cmds[:, 0].uniform_(0.15, 0.35)  # Forward velocity: 0.15-0.35 m/s
+        # cmds[:, 1] = 0.0                 # No lateral movement
+        # cmds[:, 2].uniform_(-0.2, 0.2)   # Small turning: ±0.2 rad/s
+        # self._commands[env_ids] = cmds
+
+
+
+    current_iteration = self.episode_length_buf.max().item() // 1000  # Rough estimate
+    
+    cmds = torch.zeros_like(self._commands[env_ids])
+    
+    if current_iteration < 200:
+        # Phase 1: Very slow walking (natural CPG speeds)
+        cmds[:, 0].uniform_(0.05, 0.15)  # Slow forward: 0.05-0.15 m/s
+        cmds[:, 1] = 0.0                  # No lateral
+        cmds[:, 2].uniform_(-0.1, 0.1)    # Tiny turning
+    elif current_iteration < 500:
+        # Phase 2: Normal walking
+        cmds[:, 0].uniform_(0.15, 0.35)  # Normal forward: 0.15-0.35 m/s
+        cmds[:, 1] = 0.0                  # No lateral
+        cmds[:, 2].uniform_(-0.2, 0.2)    # Small turning
+    else:
+        # Phase 3: Fast walking + omnidirectional
+        cmds[:, 0].uniform_(0.15, 0.50)   # Fast forward
+        cmds[:, 1].uniform_(-0.15, 0.15)  # Add lateral movement
+        cmds[:, 2].uniform_(-0.3, 0.3)    # More turning
+    
+    self._commands[env_ids] = cmds
         
         # ============================================
         # RESET ROBOT STATE IN SIMULATION
