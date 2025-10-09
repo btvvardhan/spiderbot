@@ -75,6 +75,7 @@ class SpiderbotEnv(DirectRLEnv):
         # X/Y linear velocity and yaw angular velocity commands
         self._commands = torch.zeros(self.num_envs, 3, device=self.device)
 
+        self._initial_root_pos = torch.zeros(self.num_envs, 3, device=self.device)
         # ============================================
         # BODY INDICES FOR CONTACT SENSING
         # ============================================
@@ -115,6 +116,7 @@ class SpiderbotEnv(DirectRLEnv):
             key: torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
             for key in [
                 # Existing rewards
+                "forward_displacement",
                 "track_lin_vel_xy_exp",
                 "track_ang_vel_z_exp",
                 "lin_vel_z_l2",
@@ -128,9 +130,6 @@ class SpiderbotEnv(DirectRLEnv):
                 "gait_symmetry",
                 "contact_timing",
                 "foot_slip",
-                "body_height",  # ← NEW: Body height reward
-                'movement_bonus',  # ← NEW: Anti-standing reward,
-                "amplitude_penalty",  # ← NEW: CPG amplitude penalty
             ]
         }
 
@@ -258,26 +257,21 @@ class SpiderbotEnv(DirectRLEnv):
         
         observations = {"policy": obs}
         return observations
-
-
     def _get_rewards(self) -> torch.Tensor:
-        """Compute reward signal - ENFORCES FORWARD MOVEMENT."""
+        """Simple velocity-based rewards."""
         
         # ============================================
-        # VELOCITY TRACKING (MADE STRICTER)
+        # SIMPLE: Just track forward velocity
         # ============================================
-        lin_vel_error = torch.sum(
-            torch.square(self._commands[:, :2] - self._robot.data.root_lin_vel_b[:, :2]), 
-            dim=1
-        )
-        # ✅ CHANGED: Stricter tracking (0.15 → 0.10)
-        lin_vel_error_mapped = torch.exp(-lin_vel_error / 0.10)  
+        current_vel = self._robot.data.root_lin_vel_b[:, 0]  # Body forward velocity
+        target_vel = self._commands[:, 0]
         
-        yaw_rate_error = torch.square(self._commands[:, 2] - self._robot.data.root_ang_vel_b[:, 2])
-        yaw_rate_error_mapped = torch.exp(-yaw_rate_error / 0.25)
+        # Main reward: match target velocity
+        vel_error = torch.square(current_vel - target_vel)
+        forward_reward = torch.exp(-vel_error / 0.25) * 20.0  # Big reward for correct velocity
         
         # ============================================
-        # STABILITY PENALTIES
+        # STABILITY (keep existing)
         # ============================================
         z_vel_error = torch.square(self._robot.data.root_lin_vel_b[:, 2])
         ang_vel_error = torch.sum(torch.square(self._robot.data.root_ang_vel_b[:, :2]), dim=1)
@@ -286,68 +280,19 @@ class SpiderbotEnv(DirectRLEnv):
         action_rate = torch.sum(torch.square(self._actions - self._previous_actions), dim=1)
         flat_orientation = torch.sum(torch.square(self._robot.data.projected_gravity_b[:, :2]), dim=1)
         
-        # ============================================
-        # CPG REWARDS
-        # ============================================
-        frequency_change = torch.sum(
-            torch.square(self._cpg_frequency - self._previous_frequency), 
-            dim=1
-        )
-        self._previous_frequency = self._cpg_frequency.clone()
-        
-        left_amps = self._cpg_amplitudes[:, [0,1,2, 6,7,8]]
-        right_amps = self._cpg_amplitudes[:, [3,4,5, 9,10,11]]
-        gait_symmetry = torch.square(left_amps.mean(dim=1) - right_amps.mean(dim=1))
-        
-        net_contact_forces = self._contact_sensor.data.net_forces_w_history
-        foot_contacts = torch.norm(net_contact_forces[:, :, self._foot_ids], dim=-1)
-        feet_in_contact = (foot_contacts[:, -1, :] > 1.0).sum(dim=1)
-        contact_timing = -torch.square(feet_in_contact.float() - 2.5)
-        
-        foot_slip = torch.zeros(self.num_envs, device=self.device)
+        # Yaw rate tracking
+        yaw_rate_error = torch.square(self._commands[:, 2] - self._robot.data.root_ang_vel_b[:, 2])
+        yaw_rate_reward = torch.exp(-yaw_rate_error / 0.25)
         
         # ============================================
-        # HEIGHT REWARD (MUCH SOFTER!)
-        # ============================================
-        target_height = 0.15
-        current_height = self._robot.data.root_pos_w[:, 2]
-        height_error = torch.square(current_height - target_height)
-        
-        # ============================================
-        # ✅ NEW: ANTI-STANDING PENALTY
-        # ============================================
-        # HARSHLY penalize standing still!
-        forward_vel = self._robot.data.root_lin_vel_b[:, 0]  # X velocity
-        
-        # If moving forward > 0.1 m/s: bonus
-        # If moving forward < 0.05 m/s: MASSIVE PENALTY
-        movement_bonus = torch.where(
-            forward_vel > 0.10,
-            forward_vel * 10.0,           # Reward: +1.0 to +5.0 for moving
-            (forward_vel - 0.10) * 50.0   # Penalty: -5.0 for standing still
-        )
-        
-        # ============================================
-        # ✅ NEW: CPG AMPLITUDE PENALTY
-        # ============================================
-        # If CPG amplitudes are too small, robot won't move
-        # Penalize if average amplitude < 0.10 rad
-        avg_amplitude = self._cpg_amplitudes.mean(dim=1)
-        amplitude_penalty = torch.where(
-            avg_amplitude < 0.10,
-            (avg_amplitude - 0.10) * 20.0,  # Penalty for tiny oscillations
-            torch.zeros_like(avg_amplitude)  # No penalty if amplitude is good
-        )
-        
-        # ============================================
-        # COMBINE REWARDS
+        # COMBINE (simple!)
         # ============================================
         rewards = {
-            # Main objectives (INCREASED scales)
-            "track_lin_vel_xy_exp": lin_vel_error_mapped * 25.0 * self.step_dt,  # ← Was 15.0
-            "track_ang_vel_z_exp": yaw_rate_error_mapped * 0.5 * self.step_dt,
+            # Main reward
+            "forward_displacement": forward_reward * self.step_dt,  # Keep same name for logging
+            "track_ang_vel_z_exp": yaw_rate_reward * 0.5 * self.step_dt,
             
-            # Stability (unchanged)
+            # Stability (same as before)
             "lin_vel_z_l2": z_vel_error * -2.0 * self.step_dt,
             "ang_vel_xy_l2": ang_vel_error * -0.05 * self.step_dt,
             "dof_torques_l2": joint_torques * -2e-5 * self.step_dt,
@@ -355,18 +300,11 @@ class SpiderbotEnv(DirectRLEnv):
             "action_rate_l2": action_rate * -0.01 * self.step_dt,
             "flat_orientation_l2": flat_orientation * -5.0 * self.step_dt,
             
-            # CPG (unchanged)
-            "frequency_change": frequency_change * -0.1 * self.step_dt,
-            "gait_symmetry": gait_symmetry * 0.5 * self.step_dt,
-            "contact_timing": contact_timing * 0.5 * self.step_dt,  # ← Reduced from 1.0
-            "foot_slip": foot_slip * -0.5 * self.step_dt,
-            
-            # Height (MUCH SOFTER!)
-            "body_height": height_error * -1.0 * self.step_dt,  # ← Was -10.0!
-            
-            # ✅ NEW: Anti-standing rewards
-            "movement_bonus": movement_bonus * self.step_dt,
-            "amplitude_penalty": amplitude_penalty * self.step_dt,
+            # CPG rewards (keep light)
+            "frequency_change": torch.zeros_like(forward_reward) * self.step_dt,  # Disabled for now
+            "gait_symmetry": torch.zeros_like(forward_reward) * self.step_dt,
+            "contact_timing": torch.zeros_like(forward_reward) * self.step_dt,
+            "foot_slip": torch.zeros_like(forward_reward) * self.step_dt,
         }
         
         reward = torch.sum(torch.stack(list(rewards.values())), dim=0)
@@ -375,8 +313,6 @@ class SpiderbotEnv(DirectRLEnv):
             self._episode_sums[key] += value
         
         return reward
-    
-
 
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
@@ -454,8 +390,8 @@ class SpiderbotEnv(DirectRLEnv):
         # Real spiders are born with functional CPG parameters!
         
         # Initialize with slow, stable walking parameters
-        self._cpg_frequency[env_ids] = 2.5  # ~0.4 Hz - slow walking frequency
-        self._cpg_amplitudes[env_ids] = 0.15  # Small amplitude - conservative movements
+        self._cpg_frequency[env_ids] = 0.5  # ~0.4 Hz - slow walking frequency
+        self._cpg_amplitudes[env_ids] = 0.3  # Small amplitude - conservative movements
         
         # Initialize with tetrapod phase pattern (already coded in SpiderCPG)
         # Legs: FL, FR, BL, BR
@@ -526,70 +462,12 @@ class SpiderbotEnv(DirectRLEnv):
 # ============================================
 # CURRICULUM: Standing → Slow Walk → Fast Walk
 # ============================================
-        # current_iteration is based on episode count, rough estimate
-        current_iteration = self.episode_length_buf.max().item() // 1000
 
         cmds = torch.zeros_like(self._commands[env_ids])
-
-        if current_iteration < 700:
-            # ============================================
-            # PHASE 1: Standing with tiny CPG oscillations (iter 0-100)
-            # ============================================
-            # Goal: Learn to balance and maintain upright posture
-            # CPG will produce minimal oscillations to find stable stance
-            cmds[:, 0].uniform_(0.15, 0.35)   # Almost zero forward: 0-0.05 m/s
-            cmds[:, 1] = 0.0                  # No lateral movement
-            cmds[:, 2].uniform_(-0.2, 0.2)  # Minimal turning: ±0.2 rad/s
-            
-        elif current_iteration < 800:
-            # ============================================
-            # PHASE 2: Very slow walking (iter 100-200)
-            # ============================================
-            # Goal: Learn basic leg coordination at safe speeds
-            # CPG starts generating small rhythmic movements
-            cmds[:, 0].uniform_(0.05, 0.15)   # Very slow forward: 0.05-0.15 m/s
-            cmds[:, 1] = 0.0                  # No lateral movement
-            cmds[:, 2].uniform_(-0.1, 0.1)    # Small turning: ±0.1 rad/s
-            
-        elif current_iteration < 900:
-            # ============================================
-            # PHASE 3: Slow to normal walking (iter 200-400)
-            # ============================================
-            # Goal: Increase speed while maintaining coordination
-            # Natural gaits should start emerging
-            cmds[:, 0].uniform_(0.10, 0.30)   # Slow-normal forward: 0.10-0.30 m/s
-            cmds[:, 1] = 0.0                  # No lateral movement
-            cmds[:, 2].uniform_(-0.15, 0.15)  # Medium turning: ±0.15 rad/s
-            
-        elif current_iteration < 1000:
-            # ============================================
-            # PHASE 4: Normal walking (iter 400-700)
-            # ============================================
-            # Goal: Master standard walking speeds
-            cmds[:, 0].uniform_(0.15, 0.40)   # Normal-fast forward: 0.15-0.40 m/s
-            cmds[:, 1] = 0.0                  # No lateral movement
-            cmds[:, 2].uniform_(-0.2, 0.2)    # Normal turning: ±0.2 rad/s
-            
-        else:
-            # ============================================
-            # PHASE 5: Fast + omnidirectional (iter 700+)
-            # ============================================
-            # Goal: Full locomotion capability in all directions
-            cmds[:, 0].uniform_(0.15, 0.50)   # Fast forward: 0.15-0.50 m/s
-            cmds[:, 1].uniform_(-0.20, 0.20)  # Add lateral movement
-            cmds[:, 2].uniform_(-0.3, 0.3)    # Full turning range
-
+        cmds[:, 0].uniform_(0.15, 0.35)   # Forward: 0.15-0.35 m/s
+        cmds[:, 1] = 0.0                 # No lateral
+        cmds[:, 2].uniform_(-0.2, 0.2)  # Turning: ±0.2 rad/s
         self._commands[env_ids] = cmds
-
-        # ✅ Optional: Print phase changes so you know when curriculum advances
-        if current_iteration in [100, 200, 400, 700]:
-            phase = {100: "PHASE 2", 200: "PHASE 3", 400: "PHASE 4", 700: "PHASE 5"}[current_iteration]
-            print(f"\n{'='*80}")
-            print(f"🎯 CURRICULUM ADVANCED TO {phase} at iteration ~{current_iteration}")
-            print(f"{'='*80}\n")
-
-
-
             
         # ============================================
         # RESET ROBOT STATE IN SIMULATION
@@ -602,6 +480,9 @@ class SpiderbotEnv(DirectRLEnv):
         self._robot.write_root_pose_to_sim(default_root_state[:, :7], env_ids)
         self._robot.write_root_velocity_to_sim(default_root_state[:, 7:], env_ids)
         self._robot.write_joint_state_to_sim(joint_pos, joint_vel, None, env_ids)
+
+        self._initial_root_pos[env_ids] = default_root_state[:, :3].clone()
+
         
         # ============================================
         # LOGGING

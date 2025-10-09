@@ -95,7 +95,7 @@ class SpiderbotEnvCfg(DirectRLEnvCfg):
     action_scale = 1.0  # Keep at 1.0 since we do custom scaling per parameter type
     
     # Observation space (unchanged)
-    observation_space = 54
+    observation_space = 48
     state_space = 0
 
     # ============================================
@@ -184,9 +184,9 @@ class SpiderbotEnvCfg(DirectRLEnvCfg):
                 # ✅ BIO-INSPIRED: Low stiffness for compliance
                 # Real spider legs are flexible, not rigid
                 # This allows natural dynamics and energy storage
-                stiffness=100.0,  # ← CHANGED from 1500! Much more compliant
-                damping=15.0,     # ← CHANGED from 30! Allows oscillations
-                effort_limit_sim=40.0,
+                stiffness=500.0,  # ← CHANGED from 1500! Much more compliant
+                damping=50.0,     # ← CHANGED from 30! Allows oscillations
+                effort_limit_sim=60.0,
                 velocity_limit_sim=8.0,
             )
         },
@@ -199,24 +199,24 @@ class SpiderbotEnvCfg(DirectRLEnvCfg):
 
             joint_pos={
                 # Leg 1 (Front-Left): Hip out, Knee bent, Ankle down
-                "Revolute_110": 0.5,   # Hip: spread outward
-                "Revolute_111": 0.8,  # Knee: bend downward
-                "Revolute_112": -0.3,   # Ankle: adjust ground contact
+                "Revolute_110": 0.6,   # Hip: spread outward
+                "Revolute_111": 0.5,  # Knee: bend downward
+                "Revolute_112": -0.2,   # Ankle: adjust ground contact
                 
                 # Leg 2 (Front-Right): Mirror of Leg 1
-                "Revolute_113": -0.5,  # Hip: spread outward (opposite side)
-                "Revolute_114": 0.8,  # Knee: bend downward
-                "Revolute_115": -0.3,   # Ankle: adjust ground contact
+                "Revolute_113": -0.6,  # Hip: spread outward (opposite side)
+                "Revolute_114": 0.5,  # Knee: bend downward
+                "Revolute_115": -0.2,   # Ankle: adjust ground contact
                 
                 # Leg 3 (Back-Left): Similar to Front-Left
-                "Revolute_116": 0.5,   # Hip: spread outward
-                "Revolute_117": 0.8,  # Knee: bend downward
-                "Revolute_118": -0.3,   # Ankle: adjust ground contact
-                
+                "Revolute_116": 0.6,   # Hip: spread outward
+                "Revolute_117": 0.5,  # Knee: bend downward
+                "Revolute_118": -0.2,   # Ankle: adjust ground contact
+
                 # Leg 4 (Back-Right): Mirror of Leg 3
-                "Revolute_119": -0.5,  # Hip: spread outward (opposite side)
-                "Revolute_120": 0.8,  # Knee: bend downward
-                "Revolute_121": -0.3,   # Ankle: adjust ground contact
+                "Revolute_119": -0.6,  # Hip: spread outward (opposite side)
+                "Revolute_120": 0.5,  # Knee: bend downward
+                "Revolute_121": -0.2,   # Ankle: adjust ground contact
             },
             joint_vel={".*": 0.0},
         ),
@@ -235,8 +235,8 @@ class SpiderbotEnvCfg(DirectRLEnvCfg):
     z_vel_reward_scale = -2.0
     ang_vel_reward_scale = -0.05
     joint_torque_reward_scale = -2e-5
-    joint_accel_reward_scale = -2.5e-7
-    action_rate_reward_scale = -0.01
+    joint_accel_reward_scale = -5e-7
+    action_rate_reward_scale = -0.05
     flat_orientation_reward_scale = -5.0
     
     # ============================================
@@ -268,8 +268,8 @@ class SpiderbotEnvCfg(DirectRLEnvCfg):
     
     # Amplitude range (radians)
     # ±0.5 rad ≈ ±28 degrees (reasonable joint movement)
-    cpg_amplitude_min = 0.0
-    cpg_amplitude_max = 0.5
+    cpg_amplitude_min = -0.3
+    cpg_amplitude_max = 0.3
     
     # Phase offset range (radians)
     # ±π allows full phase shift range
