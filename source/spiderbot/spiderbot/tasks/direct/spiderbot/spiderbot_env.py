@@ -120,7 +120,7 @@ class SpiderbotEnv(DirectRLEnv):
         self._robot.set_joint_position_target(self._processed_actions)
 
     def _get_observations(self) -> dict:
-        self._previous_actions = self._actions.clone()
+        #self._previous_actions = self._actions.clone()
         
         base_height = self._robot.data.root_pos_w[:, 2:3]
         
@@ -176,11 +176,13 @@ class SpiderbotEnv(DirectRLEnv):
         ) * self.cfg.joint_accel_reward_scale
         
         action_rate_penalty = torch.mean(
-            torch.square(self._actions - self._previous_actions), dim=1
+            torch.square(self._processed_actions - self._robot.data.joint_pos_target), dim=1
         ) * self.cfg.action_rate_reward_scale
+
+        
         
         rewards = {
-            "track_lin_vel_xy_exp": lin_vel_reward ,
+            "track_lin_vel_xy_exp": lin_vel_reward * self.step_dt,
             "track_ang_vel_z_exp": yaw_rate_reward * self.step_dt,
             "lin_vel_z_l2": z_vel_penalty * self.step_dt,
             "ang_vel_xy_l2": ang_vel_penalty * self.step_dt,

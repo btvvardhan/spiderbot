@@ -145,7 +145,7 @@ class SpiderbotEnvCfg(DirectRLEnvCfg):
         ),
     )
 
-    lin_vel_reward_scale = 500.0
+    lin_vel_reward_scale = 5000.0
     yaw_rate_reward_scale = 0.5
     
     z_vel_reward_scale = -2.0
@@ -154,7 +154,7 @@ class SpiderbotEnvCfg(DirectRLEnvCfg):
     
     joint_torque_reward_scale = -1e-4
     
-    joint_accel_reward_scale = -5e-6
+    joint_accel_reward_scale = -1e-7
     action_rate_reward_scale = -0.01
     
     frequency_change_reward_scale = -0.1
@@ -162,11 +162,14 @@ class SpiderbotEnvCfg(DirectRLEnvCfg):
     contact_timing_reward_scale = 1.0
     foot_slip_reward_scale = -0.5
     
-    cpg_frequency_min = 1.5
-    cpg_frequency_max = 8.0
+    cpg_frequency_min = 3.0
+    cpg_frequency_max = 4.0
     
-    cpg_amplitude_min = 0.0
-    cpg_amplitude_max = 0.6
+    cpg_amplitude_min = 0.3
+    cpg_amplitude_max = 0.4
     
     cpg_phase_min = -3.14159
     cpg_phase_max = 3.14159
+
+
+

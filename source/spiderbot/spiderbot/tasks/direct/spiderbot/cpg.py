@@ -15,7 +15,7 @@ class HopfCPG:
         self.x += torch.randn_like(self.x) * 0.1
         self.y += torch.randn_like(self.y) * 0.1
         
-        self.alpha = 20.0
+        self.alpha = 8.0
         
     def reset(self, env_ids: torch.Tensor):
         self.x[env_ids] = torch.randn(len(env_ids), self.num_oscillators, device=self.device) * 0.1
