@@ -12,6 +12,7 @@ from . import agents
 ##
 
 
+
 gym.register(
     id="Template-Spiderbot-Direct-v0",
     entry_point=f"{__name__}.spiderbot_env:SpiderbotEnv",

@@ -65,7 +65,7 @@ class SpiderbotEnv(DirectRLEnv):
         }
 
     def _setup_scene(self):
-        self._robot = Articulation(self.cfg.robot_cfg)
+        self._robot = Articulation(self.cfg.robot)
         self.scene.articulations["robot"] = self._robot
         self._contact_sensor = ContactSensor(self.cfg.contact_sensor)
         self.scene.sensors["contact_sensor"] = self._contact_sensor
@@ -191,45 +191,10 @@ class SpiderbotEnv(DirectRLEnv):
         if len(env_ids) == self.num_envs:
             # Spread out the resets to avoid spikes in training when many environments reset at a similar time
             self.episode_length_buf[:] = torch.randint_like(self.episode_length_buf, high=int(self.max_episode_length))
-        self._cpg.reset(env_ids)
-        
-        # Initialize CPG parameters to CENTER of action range
-        self._cpg_frequency[env_ids] = (self.cfg.cpg_frequency_min + self.cfg.cpg_frequency_max) / 2.0
-        self._cpg_amplitudes[env_ids] = (self.cfg.cpg_amplitude_min + self.cfg.cpg_amplitude_max) / 2.0
-        self._cpg_phases[env_ids] = 0.0
-        
-        self._previous_frequency[env_ids] = self._cpg_frequency[env_ids]
         self._actions[env_ids] = 0.0
         self._previous_actions[env_ids] = 0.0
-
-            # Sample new commands
-        cmds = torch.zeros_like(self._commands[env_ids])
-        self.curriculum_level = 1
-        if self.curriculum_level == 0:
-            # LEVEL 0: Constant slow forward
-            cmds[:, 0] = 0.3  # Fixed slow forward
-            cmds[:, 1] = 0.0
-            cmds[:, 2] = 0.0
-            
-        elif self.curriculum_level == 1:
-            # LEVEL 1: Variable forward speed
-            cmds[:, 0].uniform_(0.1, 0.2)
-            cmds[:, 1] = 0.0
-            cmds[:, 2] = 0.0
-            
-        elif self.curriculum_level == 2:
-            # LEVEL 2: Add turning
-            cmds[:, 0].uniform_(0.1, 0.22)
-            cmds[:, 1] = 0.0
-            cmds[:, 2].uniform_(-0.1, 0.1)
-            
-        elif self.curriculum_level >= 3:
-            # LEVEL 3: Full complexity
-            cmds[:, 0].uniform_(0.1, 0.25)
-            cmds[:, 1].uniform_(-0.03, 0.03)  # Very small lateral to start
-            cmds[:, 2].uniform_(-0.15, 0.15)
-        
-        self._commands[env_ids] = cmds
+        # Sample new commands
+        self._commands[env_ids] = torch.zeros_like(self._commands[env_ids]).uniform_(-1.0, 1.0)
         # Reset robot state
         joint_pos = self._robot.data.default_joint_pos[env_ids]
         joint_vel = self._robot.data.default_joint_vel[env_ids]
