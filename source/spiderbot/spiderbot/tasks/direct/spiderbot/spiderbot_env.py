@@ -175,6 +175,8 @@ class SpiderbotEnv(DirectRLEnv):
             ],
             dim=-1,
         )
+        # in SpiderbotEnv._get_observations, right before return
+        #obs = torch.nan_to_num(obs, nan=0.0, posinf=1e6, neginf=-1e6)
         return {"policy": obs}
 
     def _get_rewards(self) -> torch.Tensor:
