@@ -533,7 +533,7 @@ class SpiderbotEnv(DirectRLEnv):
         self.curriculum_level = 0
         if self.curriculum_level == 0:
             # LEVEL 0: Constant slow forward
-            cmds[:, 0] = 0.8
+            cmds[:, 0] = 0.3
             cmds[:, 1] = 0.0
             cmds[:, 2] = 0.0
         elif self.curriculum_level == 1:
