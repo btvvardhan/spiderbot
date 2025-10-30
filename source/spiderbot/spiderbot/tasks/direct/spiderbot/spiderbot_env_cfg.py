@@ -46,7 +46,7 @@ class SpiderbotEnvCfg(DirectRLEnvCfg):
     
     action_scale = 1.0
     
-    observation_space = 54
+    observation_space = 53
     state_space = 0
 
     sim: SimulationCfg = SimulationCfg(
@@ -163,8 +163,8 @@ class SpiderbotEnvCfg(DirectRLEnvCfg):
     # foot_slip_reward_scale = -0.5
         
     # In spiderbot_env_cfg.py
-    cpg_frequency_min = 2.5  # Was 3.0 - allow slower
-    cpg_frequency_max = 5.0  # Was 4.0 - allow faster
+    cpg_frequency_min = 1.0  # Was 3.0 - allow slower
+    cpg_frequency_max = 3.0  # Was 4.0 - allow faster
 
     cpg_amplitude_min = 0.15  # Was 0.3 - allow smaller steps
     cpg_amplitude_max = 0.5  # Was 0.4 - allow bigger steps

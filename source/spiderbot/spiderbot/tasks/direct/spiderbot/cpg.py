@@ -27,7 +27,7 @@ class HopfCPG:
         amplitude: torch.Tensor,
         phase: torch.Tensor
     ) -> torch.Tensor:
-        omega = frequency.expand(-1, self.num_oscillators)
+        omega = 2.0 * math.pi * frequency.expand(-1, self.num_oscillators)
         
         r_squared = self.x**2 + self.y**2
         
