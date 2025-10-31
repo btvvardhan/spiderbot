@@ -223,7 +223,7 @@ class SpiderbotEnv(DirectRLEnv):
             cmds[:, 2].uniform_(-0.1, 0.1)
         else:
             # LEVEL 3+: Full complexity
-            cmds[:, 0].uniform_(0.0, 0.5)
+            cmds[:, 0].uniform_(-0.5, 0.5)
             cmds[:, 1].uniform_(-0.1, 0.1)
             cmds[:, 2].uniform_(-0.3, 0.3)
         self._commands[env_ids] = cmds

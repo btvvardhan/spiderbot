@@ -145,26 +145,23 @@ class SpiderbotEnvCfg(DirectRLEnvCfg):
         ),
     )
         
-    # In spiderbot_env_cfg.py
-    cpg_frequency_min = 0.0  # Was 3.0 - allow slower
-    cpg_frequency_max = 3.0  # Was 4.0 - allow faster
+        # Allow stillness (no forced motion at zero command)
+    cpg_frequency_min = 0.0     # was 1.0
+    cpg_frequency_max = 2.0
 
-    cpg_amplitude_min = 0.0  # Was 0.3 - allow smaller steps
-    cpg_amplitude_max = 0.5  # Was 0.4 - allow bigger steps
+    cpg_amplitude_min = 0.0     # was 0.15
+    cpg_amplitude_max = 0.3
 
-    cpg_phase_min = -0.5  # Reduced from -3.14
-    cpg_phase_max = 0.5   # Reduced from 3.14
+    # Allow exploring different gait families (trot/pace/turn)
+    cpg_phase_min = -0.5     # was -0.5
+    cpg_phase_max = +0.5     # was +0.5
 
-
-
-
-    # reward scales
-    lin_vel_reward_scale = 5.0  # Increased for more movement reward
-    yaw_rate_reward_scale = 0.5
+    # Reward scales
+    lin_vel_reward_scale = 5.0
+    yaw_rate_reward_scale = 1.5   # was 0.5  (care more about yaw control)
     z_vel_reward_scale = -2.0
     ang_vel_reward_scale = -0.05
-    joint_torque_reward_scale = -1e-5  # Reduced punishment
-    joint_accel_reward_scale = -1e-7  # Reduced punishment
+    joint_torque_reward_scale = -1e-5
+    joint_accel_reward_scale = -5e-7
     action_rate_reward_scale = -0.01
     flat_orientation_reward_scale = -5.0
-    max_tilt_angle_deg = 45.0

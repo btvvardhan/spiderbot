@@ -182,7 +182,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         start_time = time.time()
         # run everything in inference mode
         ue = env.unwrapped
-        cmd = torch.tensor([0.2, 0.2, 0.0], device=ue.device).repeat(ue.num_envs, 1)
+        cmd = torch.tensor([-0.1, 0.0, 0.0], device=ue.device).repeat(ue.num_envs, 1)
         ue._commands[:] = cmd
         obs = env.get_observations()  # optional but recommended
 
