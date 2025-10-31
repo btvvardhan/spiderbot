@@ -205,7 +205,7 @@ class SpiderbotEnv(DirectRLEnv):
         self._previous_actions[env_ids] = 0.0
         # Sample new commands
         cmds = torch.zeros_like(self._commands[env_ids])
-        self.curriculum_level = 0
+        self.curriculum_level = 3
         if self.curriculum_level == 0:
             # LEVEL 0: Constant slow forward
             cmds[:, 0] = 0.3
@@ -223,10 +223,12 @@ class SpiderbotEnv(DirectRLEnv):
             cmds[:, 2].uniform_(-0.1, 0.1)
         else:
             # LEVEL 3+: Full complexity
-            cmds[:, 0].uniform_(0.1, 0.25)
-            cmds[:, 1].uniform_(-0.03, 0.03)
-            cmds[:, 2].uniform_(-0.15, 0.15)
+            cmds[:, 0].uniform_(0.0, 0.5)
+            cmds[:, 1].uniform_(-0.1, 0.1)
+            cmds[:, 2].uniform_(-0.3, 0.3)
         self._commands[env_ids] = cmds
+
+
 
         # Reset robot state
         joint_pos = self._robot.data.default_joint_pos[env_ids]
