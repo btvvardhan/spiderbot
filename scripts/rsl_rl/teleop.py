@@ -9,11 +9,13 @@
 
 import argparse
 import sys
+import torch
 
 from isaaclab.app import AppLauncher
 
 # local imports
 import cli_args  # isort: skip
+import carb
 
 # add argparse arguments
 parser = argparse.ArgumentParser(description="Train an RL agent with RSL-RL.")
@@ -78,6 +80,47 @@ from isaaclab_tasks.utils import get_checkpoint_path
 from isaaclab_tasks.utils.hydra import hydra_task_config
 
 import spiderbot.tasks  # noqa: F401
+
+
+# --- teleop helpers ---
+def _set_all_commands(env_vec, vx, vy, wz):
+    ue = env_vec.unwrapped
+    device = ue.device
+    n = ue.num_envs
+    import torch as _torch
+    cmd = _torch.tensor([vx, vy, wz], device=device).repeat(n, 1)
+    # SpiderbotEnv stores body-frame command here:
+    ue._commands[:, :] = cmd  # broadcast to all envs
+
+def _poll_teleop_and_update(env_vec, keyboard, vx=0.30, vy=0.20, wz=0.50):
+    """
+    Body-frame convention:
+      +x = forward, +y = left, +z yaw = CCW.
+    Key mapping:
+      8 -> forward ( +x )
+      6 -> right   ( -y )
+      4 -> left    ( +y )
+      3 -> yaw CW  ( -z )
+      1 -> yaw CCW ( +z )
+    If no key is pressed, command is left unchanged.
+    """
+    set_cmd = None
+    # Use numpad keys
+    if keyboard.is_key_down(carb.input.KeyboardInput.KP_8):
+        set_cmd = ( +vx,  0.0,  0.0)   # forward
+    elif keyboard.is_key_down(carb.input.KeyboardInput.KP_6):
+        set_cmd = (  0.0, -vy,  0.0)   # strafe right
+    elif keyboard.is_key_down(carb.input.KeyboardInput.KP_4):
+        set_cmd = (  0.0, +vy,  0.0)   # strafe left
+    elif keyboard.is_key_down(carb.input.KeyboardInput.KP_3):
+        set_cmd = (  0.0,  0.0, -wz)   # yaw right (CW)
+    elif keyboard.is_key_down(carb.input.KeyboardInput.KP_1):
+        set_cmd = (  0.0,  0.0, +wz)   # yaw left  (CCW)
+
+    if set_cmd is not None:
+        _set_all_commands(env_vec, *set_cmd)
+        return True
+    return False
 
 
 @hydra_task_config(args_cli.task, args_cli.agent)
@@ -174,18 +217,18 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     dt = env.unwrapped.step_dt
 
+    # acquire keyboard interface for teleop
+    keyboard = carb.input.acquire_input_interface()
+
     # reset environment
     obs = env.get_observations()
     timestep = 0
     # simulate environment
     while simulation_app.is_running():
         start_time = time.time()
+        # teleop: update command if a key is pressed
+        _poll_teleop_and_update(env, keyboard, vx=0.30, vy=0.20, wz=0.50)
         # run everything in inference mode
-        ue = env.unwrapped
-        cmd = torch.tensor([0.2, 0.2, 0.0], device=ue.device).repeat(ue.num_envs, 1)
-        ue._commands[:] = cmd
-        obs = env.get_observations()  # optional but recommended
-
         with torch.inference_mode():
             # agent stepping
             actions = policy(obs)

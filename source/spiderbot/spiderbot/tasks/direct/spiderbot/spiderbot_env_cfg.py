@@ -144,29 +144,12 @@ class SpiderbotEnvCfg(DirectRLEnvCfg):
             joint_vel={".*": 0.0},
         ),
     )
-
-    # lin_vel_reward_scale = 5.0
-    # yaw_rate_reward_scale = 0.5
-    
-    # z_vel_reward_scale = -2.0
-    # ang_vel_reward_scale = -0.05
-    # flat_orientation_reward_scale = -5.0
-    
-    # joint_torque_reward_scale = -1e-5
-    
-    # joint_accel_reward_scale = -1e-7
-    # action_rate_reward_scale = -0.01
-    
-    # frequency_change_reward_scale = -0.1
-    # gait_symmetry_reward_scale = 0.5
-    # contact_timing_reward_scale = 1.0
-    # foot_slip_reward_scale = -0.5
         
     # In spiderbot_env_cfg.py
-    cpg_frequency_min = 1.0  # Was 3.0 - allow slower
+    cpg_frequency_min = 0.0  # Was 3.0 - allow slower
     cpg_frequency_max = 3.0  # Was 4.0 - allow faster
 
-    cpg_amplitude_min = 0.15  # Was 0.3 - allow smaller steps
+    cpg_amplitude_min = 0.0  # Was 0.3 - allow smaller steps
     cpg_amplitude_max = 0.5  # Was 0.4 - allow bigger steps
 
     cpg_phase_min = -0.5  # Reduced from -3.14
