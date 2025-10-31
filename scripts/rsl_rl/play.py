@@ -3,7 +3,7 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Script to play a checkpoint if an RL agent from RSL-RL."""
+"""Script to play a checkpoint if an RL agent from RSL-RL with keyboard control."""
 
 """Launch Isaac Sim Simulator first."""
 
@@ -14,6 +14,7 @@ from isaaclab.app import AppLauncher
 
 # local imports
 import cli_args  # isort: skip
+import omni # Import omni modules
 
 # add argparse arguments
 parser = argparse.ArgumentParser(description="Train an RL agent with RSL-RL.")
@@ -34,6 +35,8 @@ parser.add_argument(
     help="Use the pre-trained checkpoint from Nucleus.",
 )
 parser.add_argument("--real-time", action="store_true", default=False, help="Run in real-time, if possible.")
+parser.add_argument("--max_lin_vel", type=float, default=1.0, help="Maximum linear velocity for keyboard control.")
+parser.add_argument("--max_ang_vel", type=float, default=1.0, help="Maximum angular velocity for keyboard control.")
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
 # append AppLauncher cli args
@@ -57,6 +60,7 @@ import gymnasium as gym
 import os
 import time
 import torch
+import carb
 
 from rsl_rl.runners import DistillationRunner, OnPolicyRunner
 
@@ -80,9 +84,179 @@ from isaaclab_tasks.utils.hydra import hydra_task_config
 import spiderbot.tasks  # noqa: F401
 
 
+class CarbKeyboardController:
+    """
+    Keyboard controller using Carb (Isaac Sim native input).
+    
+    Controls:
+        W/S: Forward/Backward
+        A/D: Left/Right lateral movement
+        Q/E: Rotate Left/Right (yaw)
+        SPACE: Emergency stop (zero all velocities)
+        ESC: Exit simulation
+        R: Reset velocities to zero
+        UP/DOWN Arrow: Increase/Decrease velocity scale
+    """
+    
+    def __init__(self, max_lin_vel=1.0, max_ang_vel=1.0, vel_increment=0.15):
+        """
+        Initialize keyboard controller using Carb input.
+        
+        Args:
+            max_lin_vel: Maximum linear velocity (m/s)
+            max_ang_vel: Maximum angular velocity (rad/s)
+            vel_increment: Velocity increment per frame when key is held
+        """
+        self.cmd_vel = [0.0, 0.0, 0.0]  # [forward, lateral, yaw]
+        self.max_lin_vel = max_lin_vel
+        self.max_ang_vel = max_ang_vel
+        self.vel_increment = vel_increment
+        self.vel_scale = 1.0
+        
+        # Get Carb input interface
+        self._appwindow = omni.appwindow.get_default_app_window()
+        self._input = carb.input.acquire_input_interface()
+        self._keyboard = self._appwindow.get_keyboard()
+        self._sub_keyboard = self._input.subscribe_to_keyboard_events(self._keyboard, self._on_keyboard_event)
+        
+        self.should_exit = False
+        self._last_scale_change_time = 0.0
+        self._scale_change_cooldown = 0.2  # seconds
+        
+        self._print_controls()
+    
+    def _print_controls(self):
+        """Print keyboard control instructions."""
+        print("\n" + "="*60)
+        print("  SPIDERBOT KEYBOARD CONTROLS (Carb Native)")
+        print("="*60)
+        print("  Movement:")
+        print("    W / S           : Forward / Backward")
+        print("    A / D           : Strafe Left / Right")
+        print("    Q / E           : Rotate Left / Right")
+        print("")
+        print("  Control:")
+        print("    SPACE           : Emergency Stop (zero all velocities)")
+        print("    R               : Reset to zero velocity")
+        print("    UP / DOWN Arrow : Increase / Decrease velocity scale")
+        print("")
+        print("  System:")
+        print("    ESC             : Exit simulation")
+        print("="*60)
+        print(f"  Max Linear Vel  : {self.max_lin_vel:.2f} m/s")
+        print(f"  Max Angular Vel : {self.max_ang_vel:.2f} rad/s")
+        print(f"  Velocity Scale  : {self.vel_scale:.2f}x")
+        print("="*60 + "\n")
+    
+    def _on_keyboard_event(self, event, *args, **kwargs):
+        """Handle keyboard events."""
+        # Handle ESC key
+        if event.type == carb.input.KeyboardEventType.KEY_PRESS:
+            if event.input == carb.input.KeyboardInput.ESCAPE:
+                self.should_exit = True
+                print("\n[INFO] ESC pressed - Exiting simulation...")
+                return True
+            
+            # Handle reset key
+            if event.input == carb.input.KeyboardInput.R:
+                self.cmd_vel = [0.0, 0.0, 0.0]
+                print("[INFO] Velocities reset to zero")
+                return True
+            
+            # Handle velocity scale changes with cooldown
+            current_time = time.time()
+            if current_time - self._last_scale_change_time > self._scale_change_cooldown:
+                if event.input == carb.input.KeyboardInput.UP:
+                    self.vel_scale = min(2.0, self.vel_scale + 0.1)
+                    print(f"[INFO] Velocity scale: {self.vel_scale:.2f}x")
+                    self._last_scale_change_time = current_time
+                    return True
+                elif event.input == carb.input.KeyboardInput.DOWN:
+                    self.vel_scale = max(0.1, self.vel_scale - 0.1)
+                    print(f"[INFO] Velocity scale: {self.vel_scale:.2f}x")
+                    self._last_scale_change_time = current_time
+                    return True
+        
+        return True
+    
+    def update(self):
+        """Update velocity commands based on current keyboard state. Call this every frame."""
+        # Check for emergency stop (SPACE)
+        if self._input.get_keyboard_value(self._keyboard, carb.input.KeyboardInput.SPACE):
+            self.cmd_vel = [0.0, 0.0, 0.0]
+            return
+        
+        # Reset velocities
+        forward = 0.0
+        lateral = 0.0
+        yaw = 0.0
+        
+        # Forward/Backward (X-axis)
+        if self._input.get_keyboard_value(self._keyboard, carb.input.KeyboardInput.W):
+            forward += self.vel_increment
+        if self._input.get_keyboard_value(self._keyboard, carb.input.KeyboardInput.S):
+            forward -= self.vel_increment
+        
+        # Left/Right lateral (Y-axis)
+        if self._input.get_keyboard_value(self._keyboard, carb.input.KeyboardInput.A):
+            lateral += self.vel_increment
+        if self._input.get_keyboard_value(self._keyboard, carb.input.KeyboardInput.D):
+            lateral -= self.vel_increment
+        
+        # Rotation (Yaw)
+        if self._input.get_keyboard_value(self._keyboard, carb.input.KeyboardInput.Q):
+            yaw += self.vel_increment
+        if self._input.get_keyboard_value(self._keyboard, carb.input.KeyboardInput.E):
+            yaw -= self.vel_increment
+        
+        # Apply velocity scale
+        forward *= self.vel_scale
+        lateral *= self.vel_scale
+        yaw *= self.vel_scale
+        
+        # Clamp values to maximum velocities
+        self.cmd_vel[0] = max(min(forward, self.max_lin_vel), -self.max_lin_vel)
+        self.cmd_vel[1] = max(min(lateral, self.max_lin_vel), -self.max_lin_vel)
+        self.cmd_vel[2] = max(min(yaw, self.max_ang_vel), -self.max_ang_vel)
+    
+    def get_command(self):
+        """
+        Get current velocity command.
+        
+        Returns:
+            List of [forward_vel, lateral_vel, yaw_vel]
+        """
+        return self.cmd_vel.copy()
+    
+    def get_command_tensor(self, device, num_envs):
+        """
+        Get current velocity command as PyTorch tensor.
+        
+        Args:
+            device: Torch device
+            num_envs: Number of environments to replicate command for
+            
+        Returns:
+            Torch tensor of shape (num_envs, 3)
+        """
+        cmd = torch.tensor(self.cmd_vel, device=device, dtype=torch.float32)
+        return cmd.unsqueeze(0).repeat(num_envs, 1)
+    
+    def should_exit_simulation(self):
+        """Check if user requested to exit."""
+        return self.should_exit
+    
+    def cleanup(self):
+        """Cleanup keyboard subscriptions."""
+        if self._sub_keyboard:
+            self._input.unsubscribe_to_keyboard_events(self._keyboard, self._sub_keyboard)
+            self._sub_keyboard = None
+        print("[INFO] Keyboard controller stopped.")
+
+
 @hydra_task_config(args_cli.task, args_cli.agent)
 def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
-    """Play with RSL-RL agent."""
+    """Play with RSL-RL agent using keyboard control."""
     # grab task name for checkpoint path
     task_name = args_cli.task.split(":")[-1]
     train_task_name = task_name.replace("-Play", "")
@@ -100,6 +274,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     log_root_path = os.path.join("logs", "rsl_rl", agent_cfg.experiment_name)
     log_root_path = os.path.abspath(log_root_path)
     print(f"[INFO] Loading experiment from directory: {log_root_path}")
+    
     if args_cli.use_pretrained_checkpoint:
         resume_path = get_published_pretrained_checkpoint("rsl_rl", train_task_name)
         if not resume_path:
@@ -138,6 +313,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
 
     print(f"[INFO]: Loading model checkpoint from: {resume_path}")
+    
     # load previously trained model
     if agent_cfg.class_name == "OnPolicyRunner":
         runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
@@ -145,6 +321,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         runner = DistillationRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
     else:
         raise ValueError(f"Unsupported runner class: {agent_cfg.class_name}")
+    
     runner.load(resume_path)
 
     # obtain the trained policy for inference
@@ -172,38 +349,80 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     export_policy_as_jit(policy_nn, normalizer=normalizer, path=export_model_dir, filename="policy.pt")
     export_policy_as_onnx(policy_nn, normalizer=normalizer, path=export_model_dir, filename="policy.onnx")
 
-    dt = env.unwrapped.step_dt
+    # Initialize keyboard controller using Carb
+    kb_controller = CarbKeyboardController(
+        max_lin_vel=args_cli.max_lin_vel,
+        max_ang_vel=args_cli.max_ang_vel,
+        vel_increment=0.15
+    )
 
+    dt = env.unwrapped.step_dt
+    
     # reset environment
     obs = env.get_observations()
     timestep = 0
+    
+    print("[INFO] Starting simulation with keyboard control...")
+    print("[INFO] Use WASD keys to move, QE to rotate, SPACE to stop, ESC to exit")
+    print("[INFO] Make sure the Isaac Sim viewport window has focus to receive keyboard input!\n")
+    
     # simulate environment
-    while simulation_app.is_running():
-        start_time = time.time()
-        # run everything in inference mode
-        ue = env.unwrapped
-        cmd = torch.tensor([-0.1, 0.0, 0.0], device=ue.device).repeat(ue.num_envs, 1)
-        ue._commands[:] = cmd
-        obs = env.get_observations()  # optional but recommended
-
-        with torch.inference_mode():
-            # agent stepping
-            actions = policy(obs)
-            # env stepping
-            obs, _, _, _ = env.step(actions)
-        if args_cli.video:
-            timestep += 1
-            # Exit the play loop after recording one video
-            if timestep == args_cli.video_length:
+    try:
+        while simulation_app.is_running():
+            # Check if user wants to exit
+            if kb_controller.should_exit_simulation():
+                print("[INFO] User requested exit via ESC key")
                 break
-
-        # time delay for real-time evaluation
-        sleep_time = dt - (time.time() - start_time)
-        if args_cli.real_time and sleep_time > 0:
-            time.sleep(sleep_time)
-
-    # close the simulator
-    env.close()
+            
+            start_time = time.time()
+            
+            # Update keyboard controller (reads current key states)
+            kb_controller.update()
+            
+            # Get keyboard command and apply to all environments
+            cmd = kb_controller.get_command_tensor(
+                device=env.unwrapped.device,
+                num_envs=env.unwrapped.num_envs
+            )
+            env.unwrapped._commands[:] = cmd
+            
+            # Get observations
+            obs = env.get_observations()
+            
+            # Run inference mode
+            with torch.inference_mode():
+                # Agent stepping
+                actions = policy(obs)
+                # Environment stepping
+                obs, _, _, _ = env.step(actions)
+            
+            # Handle video recording
+            if args_cli.video:
+                timestep += 1
+                # Exit the play loop after recording one video
+                if timestep == args_cli.video_length:
+                    print(f"[INFO] Video recording complete ({args_cli.video_length} steps)")
+                    break
+            
+            # Time delay for real-time evaluation
+            sleep_time = dt - (time.time() - start_time)
+            if args_cli.real_time and sleep_time > 0:
+                time.sleep(sleep_time)
+    
+    except KeyboardInterrupt:
+        print("\n[INFO] Simulation interrupted by user (Ctrl+C)")
+    
+    except Exception as e:
+        print(f"\n[ERROR] An error occurred during simulation: {e}")
+        import traceback
+        traceback.print_exc()
+    
+    finally:
+        # Cleanup
+        print("\n[INFO] Cleaning up...")
+        kb_controller.cleanup()
+        env.close()
+        print("[INFO] Simulation ended successfully")
 
 
 if __name__ == "__main__":
