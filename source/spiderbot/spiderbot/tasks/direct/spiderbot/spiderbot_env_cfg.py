@@ -72,11 +72,12 @@ class SpiderbotEnvCfg(DirectRLEnvCfg):
             dynamic_friction=1.0,
             restitution=0.0,
         ),
+        
         debug_vis=False,
     )
 
     contact_sensor: ContactSensorCfg = ContactSensorCfg(
-        prim_path="/World/envs/env_.*/Spider/.*",
+        prim_path="/World/envs/env_.*/Spider/spiderbot/.*",
         history_length=5,
         update_period=0.005,
         track_air_time=True,
@@ -98,10 +99,12 @@ class SpiderbotEnvCfg(DirectRLEnvCfg):
             articulation_props=sim_utils.ArticulationRootPropertiesCfg(
                 enabled_self_collisions=True,
                 solver_position_iteration_count=8
-            ),
+            ,
+            #activate_contact_sensors=True
+        ),
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
                 disable_gravity=False,
-                max_depenetration_velocity=5.0
+                max_depenetration_velocity=1.0
             ),
             activate_contact_sensors=True,
         ),
@@ -129,10 +132,10 @@ class SpiderbotEnvCfg(DirectRLEnvCfg):
 
             # ✅ Same angles you had before, mapped to your joint names
             joint_pos={
-                "fl_coxa_joint":  +0.6,   "fl_femur_joint": 0.5, "fl_tibia_joint": -0.2,
-                "fr_coxa_joint":  -0.6,   "fr_femur_joint": 0.5, "fr_tibia_joint": -0.2,
-                "rl_coxa_joint":  +0.6,   "rl_femur_joint": 0.5, "rl_tibia_joint": -0.2,
-                "rr_coxa_joint":  -0.6,   "rr_femur_joint": 0.5, "rr_tibia_joint": -0.2,
+                "fl_coxa_joint":  +0.0,   "fl_femur_joint": 0.0, "fl_tibia_joint": -0.0,
+                "fr_coxa_joint":  -0.0,   "fr_femur_joint": 0.0, "fr_tibia_joint": -0.0,
+                "rl_coxa_joint":  +0.0,   "rl_femur_joint": 0.0, "rl_tibia_joint": -0.0,
+                "rr_coxa_joint":  -0.0,   "rr_femur_joint": 0.0, "rr_tibia_joint": -0.0,
             },
             joint_vel={".*": 0.0},
         ),

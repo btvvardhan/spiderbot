@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import math
 import gymnasium as gym
 import torch
 
@@ -40,9 +41,13 @@ class SpiderbotEnv(DirectRLEnv):
 
         # Get specific body indices
         self._base_id, _ = self._contact_sensor.find_bodies("base_link")
-        self._die_body_ids, _ = self._contact_sensor.find_bodies(["arm_a_1_1", "arm_a_2_1", "arm_a_3_1", "arm_a_4_1"])
-
-
+        # Termination thresholds & counters
+        self._min_base_z = 0.06
+        self._max_tilt_deg = 65.0
+        self._max_tilt_cos = math.cos(math.radians(self._max_tilt_deg))
+        self._min_contact_force = 30.0
+        self._contact_frames_needed = 3
+        self._contact_hits = torch.zeros(self.num_envs, dtype=torch.int32, device=self.device)
         self._cpg = SpiderCPG(
                     num_envs=self.num_envs,
                     dt=self.step_dt,
@@ -173,64 +178,78 @@ class SpiderbotEnv(DirectRLEnv):
             self._episode_sums[key] += value
         return reward
 
-    def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
-        time_out = self.episode_length_buf >= self.max_episode_length - 1
-        died = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
-        net_contact_forces = self._contact_sensor.data.net_forces_w_history
-        died = torch.any(
-            torch.max(torch.norm(net_contact_forces[:, :, self._die_body_ids], dim=-1), dim=1)[0] > 1.0, dim=1
-        )
-        return died, time_out
+    def _get_dones(self):
 
+        time_out = self.episode_length_buf >= self.max_episode_length - 1
+        # Base height
+        try:
+            base_z = self._robot.data.root_pos_w[:, 2]
+        except AttributeError:
+            base_z = self._robot.data.root_state_w[:, 2]
+        too_low = base_z < self._min_base_z  
+        # Tilt from projected gravity (body up vs world up)
+        g_b = self._robot.data.projected_gravity_b  # [E,3], points down in body frame
+        g_norm = torch.linalg.norm(g_b, dim=1).clamp(min=1e-6)
+        cos_tilt = torch.abs(g_b[:, 2]) / g_norm
+        too_tilted = cos_tilt < self._max_tilt_cos
+        # Sustained base contact using contact force history (no ground filter needed)
+        net_forces = self._contact_sensor.data.net_forces_w_history  # [E,H,B,3]
+        base_id = self._base_id if isinstance(self._base_id, int) else int(self._base_id[0])
+        base_force_hist = torch.linalg.norm(net_forces[:, :, base_id], dim=-1)  # [E,H]
+        base_force_max = torch.max(base_force_hist, dim=1)[0]                   # [E]
+        touching = base_force_max > self._min_contact_force
+        self._contact_hits = torch.where(touching, self._contact_hits + 1, torch.zeros_like(self._contact_hits))
+        sustained_touch = self._contact_hits >= self._contact_frames_needed
+        bad_state = ~torch.isfinite(self._robot.data.joint_pos).all(dim=1)
+        died = too_low | too_tilted | sustained_touch | bad_state
+        return died, time_out
     def _reset_idx(self, env_ids: torch.Tensor | None):
+        # Normalize env_ids
         if env_ids is None or len(env_ids) == self.num_envs:
             env_ids = self._robot._ALL_INDICES
+    
+        # Reset robot & parent class
         self._robot.reset(env_ids)
         super()._reset_idx(env_ids)
+    
+        # Spread out resets to avoid spikes
         if len(env_ids) == self.num_envs:
-            # Spread out the resets to avoid spikes in training when many environments reset at a similar time
             self.episode_length_buf[:] = torch.randint_like(self.episode_length_buf, high=int(self.max_episode_length))
-        
-
-
+    
+        # Reset CPG state
         self._cpg.reset(env_ids)
-
+        self._contact_hits[env_ids] = 0
+    
         # Initialize CPG parameters to CENTER of action range
         self._cpg_frequency[env_ids] = (self.cfg.cpg_frequency_min + self.cfg.cpg_frequency_max) / 2.0
         self._cpg_amplitudes[env_ids] = (self.cfg.cpg_amplitude_min + self.cfg.cpg_amplitude_max) / 2.0
         self._cpg_phases[env_ids] = 0.0
-
         self._previous_frequency[env_ids] = self._cpg_frequency[env_ids]
         self._actions[env_ids] = 0.0
         self._previous_actions[env_ids] = 0.0
-        # Sample new commands
+    
+        # Sample new commands per curriculum
         cmds = torch.zeros_like(self._commands[env_ids])
-        self.curriculum_level = 3
+        self.curriculum_level = 1
         if self.curriculum_level == 0:
-            # LEVEL 0: Constant slow forward
-            cmds[:, 0] = 0.3
-            cmds[:, 1] = 0.0
+            cmds[:, 0] = 0.3; 
+            cmds[:, 1] = 0.0; 
             cmds[:, 2] = 0.0
         elif self.curriculum_level == 1:
-            # LEVEL 1: Variable forward speed
-            cmds[:, 0].uniform_(0.1, 0.2)
-            cmds[:, 1] = 0.0
+            cmds[:, 0].uniform_(0.1, 0.2); 
+            cmds[:, 1] = 0.0; 
             cmds[:, 2] = 0.0
         elif self.curriculum_level == 2:
-            # LEVEL 2: Add turning
-            cmds[:, 0].uniform_(0.1, 0.22)
-            cmds[:, 1] = 0.0
+            cmds[:, 0].uniform_(0.1, 0.22); 
+            cmds[:, 1] = 0.0; 
             cmds[:, 2].uniform_(-0.1, 0.1)
         else:
-            # LEVEL 3+: Full complexity
-            cmds[:, 0].uniform_(-0.5, 0.5)
-            cmds[:, 1].uniform_(-0.1, 0.1)
+            cmds[:, 0].uniform_(-0.5, 0.5); 
+            cmds[:, 1].uniform_(-0.1, 0.1); 
             cmds[:, 2].uniform_(-0.3, 0.3)
         self._commands[env_ids] = cmds
-
-
-
-        # Reset robot state
+    
+        # Reset robot state at env origins
         joint_pos = self._robot.data.default_joint_pos[env_ids]
         joint_vel = self._robot.data.default_joint_vel[env_ids]
         default_root_state = self._robot.data.default_root_state[env_ids]
@@ -238,6 +257,11 @@ class SpiderbotEnv(DirectRLEnv):
         self._robot.write_root_pose_to_sim(default_root_state[:, :7], env_ids)
         self._robot.write_root_velocity_to_sim(default_root_state[:, 7:], env_ids)
         self._robot.write_joint_state_to_sim(joint_pos, joint_vel, None, env_ids)
+    
+        # ---- Startup "pop" fix: sync PD targets to current pose ----
+        # This removes the initial jerk by aligning PD targets to the actual pose at reset.
+        self._robot.set_joint_position_target(self._robot.data.joint_pos)
+    
         # Logging
         extras = dict()
         for key in self._episode_sums.keys():
@@ -249,3 +273,4 @@ class SpiderbotEnv(DirectRLEnv):
         extras = dict()
         extras["Episode_Termination/time_out"] = torch.count_nonzero(self.reset_time_outs[env_ids]).item()
         self.extras["log"].update(extras)
+    
