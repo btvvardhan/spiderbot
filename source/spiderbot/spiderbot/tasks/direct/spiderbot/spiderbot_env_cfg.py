@@ -19,8 +19,8 @@ class EventCfg:
         mode="startup",
         params={
             "asset_cfg": SceneEntityCfg("robot", body_names=".*"),
-            "static_friction_range": (0.8, 0.8),
-            "dynamic_friction_range": (0.6, 0.6),
+            "static_friction_range": (1.0, 1.0),
+            "dynamic_friction_range": (0.8, 0.8),
             "restitution_range": (0.0, 0.0),
             "num_buckets": 64,
         },
@@ -81,6 +81,7 @@ class SpiderbotEnvCfg(DirectRLEnvCfg):
         update_period=0.005,
         track_air_time=True,
     )
+    
 
     scene: InteractiveSceneCfg = InteractiveSceneCfg(
         num_envs=200,
@@ -91,9 +92,9 @@ class SpiderbotEnvCfg(DirectRLEnvCfg):
     events: EventCfg = EventCfg()
 
     robot_cfg: ArticulationCfg = ArticulationCfg(
-        prim_path="/World/envs/env_.*/Spider",
+        prim_path="/World/envs/env_.*/Spider",      # container prim name in each env
         spawn=sim_utils.UsdFileCfg(
-            usd_path="/home/teja/spiderbot/assets/spiderbot/spiderbot.usd",
+            usd_path="/home/teja/spiderbot/assets/spidy/spiderbot.usd",
             articulation_props=sim_utils.ArticulationRootPropertiesCfg(
                 enabled_self_collisions=True,
                 solver_position_iteration_count=8
@@ -105,17 +106,19 @@ class SpiderbotEnvCfg(DirectRLEnvCfg):
             activate_contact_sensors=True,
         ),
 
+        # ✅ Use your 12 actual joint names (3 × 4 legs)
         actuators={
             "legs": ImplicitActuatorCfg(
                 joint_names_expr=[
-                    r"Revolute_110", r"Revolute_111", r"Revolute_112",
-                    r"Revolute_113", r"Revolute_114", r"Revolute_115",
-                    r"Revolute_116", r"Revolute_117", r"Revolute_118",
-                    r"Revolute_119", r"Revolute_120", r"Revolute_121",
+                    "fl_coxa_joint",  "fl_femur_joint",  "fl_tibia_joint",
+                    "fr_coxa_joint",  "fr_femur_joint",  "fr_tibia_joint",
+                    "rl_coxa_joint",  "rl_femur_joint",  "rl_tibia_joint",
+                    "rr_coxa_joint",  "rr_femur_joint",  "rr_tibia_joint",
                 ],
-                stiffness=150.0,
-                damping=30.0,
-                effort_limit_sim=60.0,
+                # sane PD for sim (you can tune later)
+                stiffness=100.0,
+                damping=4.0,
+                effort_limit_sim=40.0,     # raise to 60 if it sags; lower if too “strong”
                 velocity_limit_sim=8.0,
             )
         },
@@ -124,26 +127,22 @@ class SpiderbotEnvCfg(DirectRLEnvCfg):
             pos=(0.0, 0.0, 0.15),
             rot=(1.0, 0.0, 0.0, 0.0),
 
+            # ✅ Same angles you had before, mapped to your joint names
             joint_pos={
-                "Revolute_110": 0.6,
-                "Revolute_111": 0.5,
-                "Revolute_112": -0.2,
-                
-                "Revolute_113": -0.6,
-                "Revolute_114": 0.5,
-                "Revolute_115": -0.2,
-                
-                "Revolute_116": 0.6,
-                "Revolute_117": 0.5,
-                "Revolute_118": -0.2,
-
-                "Revolute_119": -0.6,
-                "Revolute_120": 0.5,
-                "Revolute_121": -0.2,
+                "fl_coxa_joint":  +0.6,   "fl_femur_joint": 0.5, "fl_tibia_joint": -0.2,
+                "fr_coxa_joint":  -0.6,   "fr_femur_joint": 0.5, "fr_tibia_joint": -0.2,
+                "rl_coxa_joint":  +0.6,   "rl_femur_joint": 0.5, "rl_tibia_joint": -0.2,
+                "rr_coxa_joint":  -0.6,   "rr_femur_joint": 0.5, "rr_tibia_joint": -0.2,
             },
             joint_vel={".*": 0.0},
         ),
-    )
+    )        
+
+
+
+
+
+
         
         # Allow stillness (no forced motion at zero command)
     cpg_frequency_min = 0.0     # was 1.0
