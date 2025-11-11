@@ -70,7 +70,7 @@ class SpiderbotEnv(DirectRLEnv):
         }
 
     def _setup_scene(self):
-        self._robot = Articulation(self.cfg.robot_cfg)
+        self._robot = Articulation(self.cfg.robot)
         self.scene.articulations["robot"] = self._robot
         self._contact_sensor = ContactSensor(self.cfg.contact_sensor)
         self.scene.sensors["contact_sensor"] = self._contact_sensor
@@ -159,8 +159,7 @@ class SpiderbotEnv(DirectRLEnv):
         action_rate = torch.sum(torch.square(self._actions - self._previous_actions), dim=1)
         # flat orientation
         flat_orientation = torch.sum(torch.square(self._robot.data.projected_gravity_b[:, :2]), dim=1)
-        # stationary penalty
-        lin_vel_norm = torch.norm(self._robot.data.root_lin_vel_b[:, :2], dim=1)
+        
 
         rewards = {
             "track_lin_vel_xy_exp": lin_vel_error_mapped * self.cfg.lin_vel_reward_scale * self.step_dt,
@@ -258,7 +257,6 @@ class SpiderbotEnv(DirectRLEnv):
         self._robot.write_root_velocity_to_sim(default_root_state[:, 7:], env_ids)
         self._robot.write_joint_state_to_sim(joint_pos, joint_vel, None, env_ids)
     
-        # ---- Startup "pop" fix: sync PD targets to current pose ----
         # This removes the initial jerk by aligning PD targets to the actual pose at reset.
         self._robot.set_joint_position_target(self._robot.data.joint_pos)
     
