@@ -70,27 +70,6 @@ class SpiderbotEnv(DirectRLEnv):
             ]
         }
 
-        # ---------------------------------------------------------------------
-        # [MOD] Curriculum state & thresholds (auto-advance + rehearsal)
-        #       Stages: 0=forward, 1=backward, 2=right, 3=left, 4=yaw
-        # ---------------------------------------------------------------------
-        self.curriculum_stage = 0
-        self._stage_names = ["forward", "backward", "right", "left", "yaw"]
-        self._num_stages = len(self._stage_names)
-        self._per_env_stage = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
-
-        # Defaults (can be overridden by cfg if you add those fields)
-        self._stage_threshold_xy  = float(getattr(self.cfg, "curriculum_threshold_xy", 0.92))
-        self._stage_threshold_yaw = float(getattr(self.cfg, "curriculum_threshold_yaw", 0.90))
-        self._stage_min_episodes  = int(getattr(self.cfg, "curriculum_min_episodes", max(self.num_envs, 512)))
-        self._rehearsal_prob      = float(getattr(self.cfg, "curriculum_rehearsal_prob", 0.30))
-
-        self._stage_perf_xy_ema  = torch.zeros(self._num_stages, device=self.device)
-        self._stage_perf_yaw_ema = torch.zeros(self._num_stages, device=self.device)
-        self._stage_counts       = torch.zeros(self._num_stages, dtype=torch.long, device=self.device)
-        self._ema_beta = 0.1
-        # ---------------------------------------------------------------------
-
     def _setup_scene(self):
         self._robot = Articulation(self.cfg.robot)
         self.scene.articulations["robot"] = self._robot
@@ -107,106 +86,6 @@ class SpiderbotEnv(DirectRLEnv):
         # add lights
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
         light_cfg.func("/World/Light", light_cfg)
-
-    # -------------------------------------------------------------------------
-    # [MOD] Helpers for curriculum & command mapping
-    # -------------------------------------------------------------------------
-    def _sample_commands_for_stage(self, stage: int, cmds: torch.Tensor) -> torch.Tensor:
-        """Fill 'cmds' (K,3) with targets for the given stage."""
-        if stage == 0:  # forward
-            cmds[:, 0] = 0.3;  cmds[:, 1] = 0.0;  cmds[:, 2] = 0.0
-        elif stage == 1:  # backward
-            cmds[:, 0] = -0.3; cmds[:, 1] = 0.0;  cmds[:, 2] = 0.0
-        elif stage == 2:  # right strafe
-            cmds[:, 0] = 0.0;  cmds[:, 1] = +0.3; cmds[:, 2] = 0.0
-        elif stage == 3:  # left strafe
-            cmds[:, 0] = 0.0;  cmds[:, 1] = -0.3; cmds[:, 2] = 0.0
-        elif stage == 4:  # yaw only
-            cmds[:, 0] = 0.0;  cmds[:, 1] = 0.0;  cmds[:, 2].uniform_(-0.3, 0.3)
-        else:  # fallback mixed
-            cmds[:, 0].uniform_(-0.5, 0.5)
-            cmds[:, 1].uniform_(-0.5, 0.5)
-            cmds[:, 2].uniform_(-0.3, 0.3)
-        return cmds
-
-    def _map_commands_to_body(self, cmds: torch.Tensor) -> torch.Tensor:
-        """Map user-intent commands to robot body frame.
-        Isaac uses +Y = left; here we define +Y command as 'right', so flip sign."""
-        cmds_b = torch.zeros_like(cmds)
-        cmds_b[:, 0] = -cmds[:, 1]        # body X <= forward (no swap)
-        cmds_b[:, 1] = -cmds[:, 0]       # body Y <= right (flip because +Y is left)
-        cmds_b[:, 2] = cmds[:, 2]        # yaw unchanged
-        return cmds_b
-
-    def _assign_stages_and_commands(self, env_ids: torch.Tensor):
-        """Assign each env a stage (with rehearsal) and write _commands."""
-        if self.curriculum_stage >= self._num_stages:
-            max_stage = self._num_stages - 1
-        else:
-            max_stage = self.curriculum_stage
-
-        K = len(env_ids)
-        stages = torch.full((K,), max_stage, dtype=torch.long, device=self.device)
-        if max_stage > 0:
-            rand = torch.rand(K, device=self.device)
-            prior_choice = torch.randint(low=0, high=max_stage + 1, size=(K,), device=self.device)
-            stages = torch.where(rand < self._rehearsal_prob, prior_choice, stages)
-
-        self._per_env_stage[env_ids] = stages
-
-        cmds = torch.zeros_like(self._commands[env_ids])
-        # fill per stage
-        for s in range(max_stage + 1):
-            mask = (stages == s)
-            if mask.any():
-                ids = torch.nonzero(mask, as_tuple=False).squeeze(-1)
-                sub = cmds[ids]
-                sub = self._sample_commands_for_stage(s, sub)
-                cmds[ids] = sub
-
-        # map to body frame and store
-        self._commands[env_ids] = self._map_commands_to_body(cmds)
-
-    def _update_stage_metrics(self, env_ids: torch.Tensor):
-        """Update EMA metrics for the stages that just finished an episode."""
-        ep_len = self.episode_length_buf[env_ids].to(torch.float32).clamp(min=1.0)
-
-        # Reconstruct means of exp(-error/0.25) from your scaled sums
-        xy_sum  = self._episode_sums["track_lin_vel_xy_exp"][env_ids]
-        yaw_sum = self._episode_sums["track_ang_vel_z_exp"][env_ids]
-        denom_xy  = (self.cfg.lin_vel_reward_scale  * self.step_dt) * ep_len
-        denom_yaw = (self.cfg.yaw_rate_reward_scale * self.step_dt) * ep_len
-
-        xy_mean  = torch.where(denom_xy  > 0, xy_sum  / denom_xy,  torch.zeros_like(xy_sum))
-        yaw_mean = torch.where(denom_yaw > 0, yaw_sum / denom_yaw, torch.zeros_like(yaw_sum))
-        xy_mean  = torch.clamp(xy_mean,  0.0, 1.0)
-        yaw_mean = torch.clamp(yaw_mean, 0.0, 1.0)
-
-        stages = self._per_env_stage[env_ids]
-        beta = self._ema_beta
-        for s in range(self._num_stages):
-            mask = (stages == s)
-            if mask.any():
-                m_xy  = xy_mean[mask].mean()
-                m_yaw = yaw_mean[mask].mean()
-                self._stage_perf_xy_ema[s]  = (1 - beta) * self._stage_perf_xy_ema[s]  + beta * m_xy
-                self._stage_perf_yaw_ema[s] = (1 - beta) * self._stage_perf_yaw_ema[s] + beta * m_yaw
-                self._stage_counts[s] += int(mask.sum())
-
-    def _maybe_advance_curriculum(self):
-        """Advance to next stage if the current one is mastered."""
-        s = int(self.curriculum_stage)
-        if s >= self._num_stages - 1:
-            return
-        if s == 4:  # yaw stage
-            perf = float(self._stage_perf_yaw_ema[s].item())
-            thr  = self._stage_threshold_yaw
-        else:
-            perf = float(self._stage_perf_xy_ema[s].item())
-            thr  = self._stage_threshold_xy
-        if (self._stage_counts[s] >= self._stage_min_episodes) and (perf >= thr):
-            self.curriculum_stage = s + 1
-    # -------------------------------------------------------------------------
 
     def _pre_physics_step(self, actions: torch.Tensor):
         self._previous_actions = self._actions.clone()
@@ -339,7 +218,6 @@ class SpiderbotEnv(DirectRLEnv):
         bad_state = ~torch.isfinite(self._robot.data.joint_pos).all(dim=1)
         died = too_low | too_tilted | sustained_touch | bad_state
         return died, time_out
-
     def _reset_idx(self, env_ids: torch.Tensor | None):
         # Normalize env_ids
         if env_ids is None or len(env_ids) == self.num_envs:
@@ -353,13 +231,6 @@ class SpiderbotEnv(DirectRLEnv):
         if len(env_ids) == self.num_envs:
             self.episode_length_buf[:] = torch.randint_like(self.episode_length_buf, high=int(self.max_episode_length))
     
-        # Update curriculum metrics for episodes that just finished
-        # [MOD] Only use episodes that actually ran for a bit to avoid startup noise
-        valid_mask = self.episode_length_buf[env_ids] > 10
-        if valid_mask.any():
-            self._update_stage_metrics(env_ids[valid_mask])
-            self._maybe_advance_curriculum()
-    
         # Reset CPG state
         self._cpg.reset(env_ids)
         self._contact_hits[env_ids] = 0
@@ -368,7 +239,7 @@ class SpiderbotEnv(DirectRLEnv):
         self._cpg_frequency[env_ids] = (self.cfg.cpg_frequency_min + self.cfg.cpg_frequency_max) / 2.0
         self._cpg_amplitudes[env_ids] = (self.cfg.cpg_amplitude_min + self.cfg.cpg_amplitude_max) / 2.0
         self._cpg_phases[env_ids] = 0.0
-        # after setting _cpg_frequency/_cpg_amplitudes/_cpg_phases
+                # after setting _cpg_frequency/_cpg_amplitudes/_cpg_phases
         self._prev_amp[env_ids]   = self._cpg_amplitudes[env_ids]
         self._prev_phase[env_ids] = self._cpg_phases[env_ids]
         # you already do:
@@ -379,9 +250,33 @@ class SpiderbotEnv(DirectRLEnv):
         self._previous_actions[env_ids] = 0.0
     
         # Sample new commands per curriculum
-        # [MOD] Replaces old 'curriculum_level' block and the axis-swapping mapping.
-        self._assign_stages_and_commands(env_ids)
-    
+        cmds = torch.zeros_like(self._commands[env_ids])
+        self.curriculum_level = 0
+        if self.curriculum_level == 0:
+            cmds[:, 0] = 0.3; 
+            cmds[:, 1] = 0.0; 
+            cmds[:, 2] = 0.0
+        elif self.curriculum_level == 1:
+            cmds[:, 0].uniform_(0.1, 0.3); 
+            cmds[:, 1] = 0.0; 
+            cmds[:, 2] = 0.0
+        elif self.curriculum_level == 2:
+            cmds[:, 0].uniform_(0.1, 0.22); 
+            cmds[:, 1] = 0.0; 
+            cmds[:, 2].uniform_(-0.1, 0.1)
+        else:
+            cmds[:, 0].uniform_(-0.5, 0.5); 
+            cmds[:, 1].uniform_(-0.1, 0.1); 
+            cmds[:, 2].uniform_(-0.3, 0.3)
+            
+    # user intent -> body frame (Isaac: +Y is left)
+        cmds_b = torch.zeros_like(cmds)
+        cmds_b[:, 0] =  -cmds[:, 1]   # body X  <= forward
+        cmds_b[:, 1] = -cmds[:, 0]   # body Y  <= - right  (because +Y left in Isaac)
+        cmds_b[:, 2] =  cmds[:, 2]   # yaw (flip sign later if needed)
+        self._commands[env_ids] = cmds_b
+
+
         # Reset robot state at env origins
         joint_pos = self._robot.data.default_joint_pos[env_ids]
         joint_vel = self._robot.data.default_joint_vel[env_ids]
@@ -400,16 +295,9 @@ class SpiderbotEnv(DirectRLEnv):
             episodic_sum_avg = torch.mean(self._episode_sums[key][env_ids])
             extras["Episode_Reward/" + key] = episodic_sum_avg / self.max_episode_length_s
             self._episode_sums[key][env_ids] = 0.0
-
-        # [MOD] Curriculum diagnostics
-        extras["Curriculum/stage"] = float(self.curriculum_stage)
-        cur = min(self.curriculum_stage, self._num_stages - 1)
-        extras["Curriculum/xy_ema"]  = float(self._stage_perf_xy_ema[cur].item())
-        extras["Curriculum/yaw_ema"] = float(self._stage_perf_yaw_ema[cur].item())
-        extras["Curriculum/episodes_in_stage"] = int(self._stage_counts[cur].item())
-
         self.extras["log"] = dict()
         self.extras["log"].update(extras)
         extras = dict()
         extras["Episode_Termination/time_out"] = torch.count_nonzero(self.reset_time_outs[env_ids]).item()
         self.extras["log"].update(extras)
+    
