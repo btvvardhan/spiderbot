@@ -71,6 +71,15 @@ class SpiderbotEnv(DirectRLEnv):
         }
 
         # ---------------------------------------------------------------------
+        # [MOD] Raw per-episode trackers (0..1) to drive curriculum robustly
+        #       independent of reward scales.
+        # ---------------------------------------------------------------------
+        self._episode_perf_raw = {
+            "xy":  torch.zeros(self.num_envs, dtype=torch.float, device=self.device),
+            "yaw": torch.zeros(self.num_envs, dtype=torch.float, device=self.device),
+        }
+
+        # ---------------------------------------------------------------------
         # [MOD] Curriculum state & thresholds (auto-advance + rehearsal)
         #       Stages: 0=forward, 1=backward, 2=right, 3=left, 4=yaw
         # ---------------------------------------------------------------------
@@ -131,10 +140,11 @@ class SpiderbotEnv(DirectRLEnv):
 
     def _map_commands_to_body(self, cmds: torch.Tensor) -> torch.Tensor:
         """Map user-intent commands to robot body frame.
-        Isaac uses +Y = left; here we define +Y command as 'right', so flip sign."""
+        Isaac uses +Y = left; here we define +Y command as 'right' -> flip Y."""
         cmds_b = torch.zeros_like(cmds)
-        cmds_b[:, 0] = -cmds[:, 1]        # body X <= forward (no swap)
-        cmds_b[:, 1] = -cmds[:, 0]       # body Y <= right (flip because +Y is left)
+        # [MOD] Correct mapping: forward -> +X, right -> -Y (because +Y is left in Isaac)
+        cmds_b[:, 0] = -cmds[:, 1]        # body X <= forward
+        cmds_b[:, 1] = -cmds[:, 0]       # body Y <= right (negated)
         cmds_b[:, 2] = cmds[:, 2]        # yaw unchanged
         return cmds_b
 
@@ -171,16 +181,9 @@ class SpiderbotEnv(DirectRLEnv):
         """Update EMA metrics for the stages that just finished an episode."""
         ep_len = self.episode_length_buf[env_ids].to(torch.float32).clamp(min=1.0)
 
-        # Reconstruct means of exp(-error/0.25) from your scaled sums
-        xy_sum  = self._episode_sums["track_lin_vel_xy_exp"][env_ids]
-        yaw_sum = self._episode_sums["track_ang_vel_z_exp"][env_ids]
-        denom_xy  = (self.cfg.lin_vel_reward_scale  * self.step_dt) * ep_len
-        denom_yaw = (self.cfg.yaw_rate_reward_scale * self.step_dt) * ep_len
-
-        xy_mean  = torch.where(denom_xy  > 0, xy_sum  / denom_xy,  torch.zeros_like(xy_sum))
-        yaw_mean = torch.where(denom_yaw > 0, yaw_sum / denom_yaw, torch.zeros_like(yaw_sum))
-        xy_mean  = torch.clamp(xy_mean,  0.0, 1.0)
-        yaw_mean = torch.clamp(yaw_mean, 0.0, 1.0)
+        # [MOD] Use raw exp(-error/0.25) means in [0,1], independent of reward scales
+        xy_mean  = (self._episode_perf_raw["xy"][env_ids]  / ep_len).clamp(0.0, 1.0)
+        yaw_mean = (self._episode_perf_raw["yaw"][env_ids] / ep_len).clamp(0.0, 1.0)
 
         stages = self._per_env_stage[env_ids]
         beta = self._ema_beta
@@ -297,6 +300,9 @@ class SpiderbotEnv(DirectRLEnv):
         # flat orientation
         flat_orientation = torch.sum(torch.square(self._robot.data.projected_gravity_b[:, :2]), dim=1)
         
+        # [MOD] accumulate unscaled trackers for curriculum
+        self._episode_perf_raw["xy"]  += lin_vel_error_mapped
+        self._episode_perf_raw["yaw"] += yaw_rate_error_mapped
 
         rewards = {
             "track_lin_vel_xy_exp": lin_vel_error_mapped * self.cfg.lin_vel_reward_scale * self.step_dt,
@@ -400,6 +406,10 @@ class SpiderbotEnv(DirectRLEnv):
             episodic_sum_avg = torch.mean(self._episode_sums[key][env_ids])
             extras["Episode_Reward/" + key] = episodic_sum_avg / self.max_episode_length_s
             self._episode_sums[key][env_ids] = 0.0
+
+        # [MOD] Clear raw curriculum trackers for these finished envs
+        self._episode_perf_raw["xy"][env_ids]  = 0.0
+        self._episode_perf_raw["yaw"][env_ids] = 0.0
 
         # [MOD] Curriculum diagnostics
         extras["Curriculum/stage"] = float(self.curriculum_stage)
