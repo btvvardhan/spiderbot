@@ -130,6 +130,7 @@ class SpiderbotEnv(DirectRLEnv):
             leg_phase_offsets=self._cpg_phases
         )
         
+        
         self._processed_actions = joint_deltas + self._robot.data.default_joint_pos
 
     def _apply_action(self):
@@ -256,7 +257,7 @@ class SpiderbotEnv(DirectRLEnv):
             cmds[:, 1] = 0.0; 
             cmds[:, 2] = 0.0
         elif self.curriculum_level == 1:
-            cmds[:, 0].uniform_(0.1, 0.2); 
+            cmds[:, 0].uniform_(0.1, 0.3); 
             cmds[:, 1] = 0.0; 
             cmds[:, 2] = 0.0
         elif self.curriculum_level == 2:
@@ -267,8 +268,17 @@ class SpiderbotEnv(DirectRLEnv):
             cmds[:, 0].uniform_(-0.5, 0.5); 
             cmds[:, 1].uniform_(-0.1, 0.1); 
             cmds[:, 2].uniform_(-0.3, 0.3)
+            
         self._commands[env_ids] = cmds
     
+        # cmds_sim = cmds.clone()
+        # cmds_sim[:, 0] = cmds[:, 1]   # X forward stays X forward
+        # cmds_sim[:, 1] = -cmds_sim[:, 0]   # Y right -> Y left
+        # cmds_sim[:, 2] = cmds_sim[:, 2]   # yaw sign flips when Z flips
+        # self._commands[env_ids] = cmds_sim
+    
+
+
         # Reset robot state at env origins
         joint_pos = self._robot.data.default_joint_pos[env_ids]
         joint_vel = self._robot.data.default_joint_vel[env_ids]
