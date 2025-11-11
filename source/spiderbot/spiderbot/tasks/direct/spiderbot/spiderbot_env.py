@@ -35,7 +35,8 @@ class SpiderbotEnv(DirectRLEnv):
         self._cpg_amplitudes = torch.zeros(self.num_envs, 12, device=self.device)
         self._cpg_phases = torch.zeros(self.num_envs, 4, device=self.device)
         self._previous_frequency = torch.zeros_like(self._cpg_frequency)
-
+        self._prev_amp   = torch.zeros(self.num_envs, 12, device=self.device)
+        self._prev_phase = torch.zeros(self.num_envs, 4,  device=self.device)
         # X/Y linear velocity and yaw angular velocity commands
         self._commands = torch.zeros(self.num_envs, 3, device=self.device)
 
@@ -108,6 +109,20 @@ class SpiderbotEnv(DirectRLEnv):
             self.cfg.cpg_phase_min +
             (phase_raw + 1.0) * 0.5 * (self.cfg.cpg_phase_max - self.cfg.cpg_phase_min)
         )
+        beta_f, beta_a, beta_p = 0.2, 0.2, 0.2
+
+        new_freq  = self._cpg_frequency
+        new_amp   = self._cpg_amplitudes
+        new_phase = self._cpg_phases
+
+        self._cpg_frequency = self._previous_frequency + beta_f * (new_freq  - self._previous_frequency)
+        self._cpg_amplitudes = self._prev_amp          + beta_a * (new_amp   - self._prev_amp)
+        self._cpg_phases     = self._prev_phase        + beta_p * (new_phase - self._prev_phase)
+
+        self._previous_frequency = self._cpg_frequency.clone()
+        self._prev_amp   = self._cpg_amplitudes.clone()
+        self._prev_phase = self._cpg_phases.clone()
+        # smooth factors (0..1), smaller = smoother
         
         joint_deltas = self._cpg.compute_joint_targets(
             frequency=self._cpg_frequency,
@@ -223,6 +238,12 @@ class SpiderbotEnv(DirectRLEnv):
         self._cpg_frequency[env_ids] = (self.cfg.cpg_frequency_min + self.cfg.cpg_frequency_max) / 2.0
         self._cpg_amplitudes[env_ids] = (self.cfg.cpg_amplitude_min + self.cfg.cpg_amplitude_max) / 2.0
         self._cpg_phases[env_ids] = 0.0
+                # after setting _cpg_frequency/_cpg_amplitudes/_cpg_phases
+        self._prev_amp[env_ids]   = self._cpg_amplitudes[env_ids]
+        self._prev_phase[env_ids] = self._cpg_phases[env_ids]
+        # you already do:
+        # self._previous_frequency[env_ids] = self._cpg_frequency[env_ids]
+
         self._previous_frequency[env_ids] = self._cpg_frequency[env_ids]
         self._actions[env_ids] = 0.0
         self._previous_actions[env_ids] = 0.0
