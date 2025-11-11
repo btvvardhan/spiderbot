@@ -177,13 +177,16 @@ class SpiderbotEnv(DirectRLEnv):
         # map to body frame and store
         self._commands[env_ids] = self._map_commands_to_body(cmds)
 
-    def _update_stage_metrics(self, env_ids: torch.Tensor):
+    # [MOD] accept previous episode lengths so we can update BEFORE reset
+    def _update_stage_metrics(self, env_ids: torch.Tensor, ep_len_prev: torch.Tensor):
         """Update EMA metrics for the stages that just finished an episode."""
-        ep_len = self.episode_length_buf[env_ids].to(torch.float32).clamp(min=1.0)
+        ep_len = ep_len_prev.to(torch.float32).clamp(min=1.0)
 
-        # [MOD] Use raw exp(-error/0.25) means in [0,1], independent of reward scales
-        xy_mean  = (self._episode_perf_raw["xy"][env_ids]  / ep_len).clamp(0.0, 1.0)
-        yaw_mean = (self._episode_perf_raw["yaw"][env_ids] / ep_len).clamp(0.0, 1.0)
+        # Use raw exp(-error/0.25) means in [0,1], independent of reward scales
+        xy_tot  = self._episode_perf_raw["xy"][env_ids]
+        yaw_tot = self._episode_perf_raw["yaw"][env_ids]
+        xy_mean  = (xy_tot  / ep_len).clamp(0.0, 1.0)
+        yaw_mean = (yaw_tot / ep_len).clamp(0.0, 1.0)
 
         stages = self._per_env_stage[env_ids]
         beta = self._ema_beta
@@ -350,44 +353,44 @@ class SpiderbotEnv(DirectRLEnv):
         # Normalize env_ids
         if env_ids is None or len(env_ids) == self.num_envs:
             env_ids = self._robot._ALL_INDICES
-    
+
+        # -----------------------------------------------------------------
+        # [MOD] Update curriculum BEFORE resetting, using previous ep length
+        # -----------------------------------------------------------------
+        ep_len_prev = self.episode_length_buf[env_ids].clone()
+        valid_mask = ep_len_prev > 10
+        if valid_mask.any():
+            ids = env_ids[valid_mask]
+            self._update_stage_metrics(ids, ep_len_prev[valid_mask])
+            self._maybe_advance_curriculum()
+        # -----------------------------------------------------------------
+
         # Reset robot & parent class
         self._robot.reset(env_ids)
         super()._reset_idx(env_ids)
-    
-        # Spread out resets to avoid spikes
+
+        # Spread out resets to avoid spikes (safe AFTER metrics update)
         if len(env_ids) == self.num_envs:
             self.episode_length_buf[:] = torch.randint_like(self.episode_length_buf, high=int(self.max_episode_length))
-    
-        # Update curriculum metrics for episodes that just finished
-        # [MOD] Only use episodes that actually ran for a bit to avoid startup noise
-        valid_mask = self.episode_length_buf[env_ids] > 10
-        if valid_mask.any():
-            self._update_stage_metrics(env_ids[valid_mask])
-            self._maybe_advance_curriculum()
-    
+
         # Reset CPG state
         self._cpg.reset(env_ids)
         self._contact_hits[env_ids] = 0
-    
+
         # Initialize CPG parameters to CENTER of action range
         self._cpg_frequency[env_ids] = (self.cfg.cpg_frequency_min + self.cfg.cpg_frequency_max) / 2.0
         self._cpg_amplitudes[env_ids] = (self.cfg.cpg_amplitude_min + self.cfg.cpg_amplitude_max) / 2.0
         self._cpg_phases[env_ids] = 0.0
-        # after setting _cpg_frequency/_cpg_amplitudes/_cpg_phases
         self._prev_amp[env_ids]   = self._cpg_amplitudes[env_ids]
         self._prev_phase[env_ids] = self._cpg_phases[env_ids]
-        # you already do:
-        # self._previous_frequency[env_ids] = self._cpg_frequency[env_ids]
-
         self._previous_frequency[env_ids] = self._cpg_frequency[env_ids]
         self._actions[env_ids] = 0.0
         self._previous_actions[env_ids] = 0.0
-    
+
         # Sample new commands per curriculum
         # [MOD] Replaces old 'curriculum_level' block and the axis-swapping mapping.
         self._assign_stages_and_commands(env_ids)
-    
+
         # Reset robot state at env origins
         joint_pos = self._robot.data.default_joint_pos[env_ids]
         joint_vel = self._robot.data.default_joint_vel[env_ids]
@@ -396,10 +399,10 @@ class SpiderbotEnv(DirectRLEnv):
         self._robot.write_root_pose_to_sim(default_root_state[:, :7], env_ids)
         self._robot.write_root_velocity_to_sim(default_root_state[:, 7:], env_ids)
         self._robot.write_joint_state_to_sim(joint_pos, joint_vel, None, env_ids)
-    
+
         # This removes the initial jerk by aligning PD targets to the actual pose at reset.
         self._robot.set_joint_position_target(self._robot.data.joint_pos)
-    
+
         # Logging
         extras = dict()
         for key in self._episode_sums.keys():
