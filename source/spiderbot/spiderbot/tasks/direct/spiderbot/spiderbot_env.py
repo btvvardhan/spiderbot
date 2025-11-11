@@ -251,7 +251,7 @@ class SpiderbotEnv(DirectRLEnv):
     
         # Sample new commands per curriculum
         cmds = torch.zeros_like(self._commands[env_ids])
-        self.curriculum_level = 1
+        self.curriculum_level = 0
         if self.curriculum_level == 0:
             cmds[:, 0] = 0.3; 
             cmds[:, 1] = 0.0; 
@@ -269,14 +269,12 @@ class SpiderbotEnv(DirectRLEnv):
             cmds[:, 1].uniform_(-0.1, 0.1); 
             cmds[:, 2].uniform_(-0.3, 0.3)
             
-        self._commands[env_ids] = cmds
-    
-        # cmds_sim = cmds.clone()
-        # cmds_sim[:, 0] = cmds[:, 1]   # X forward stays X forward
-        # cmds_sim[:, 1] = -cmds_sim[:, 0]   # Y right -> Y left
-        # cmds_sim[:, 2] = cmds_sim[:, 2]   # yaw sign flips when Z flips
-        # self._commands[env_ids] = cmds_sim
-    
+    # user intent -> body frame (Isaac: +Y is left)
+        cmds_b = torch.zeros_like(cmds)
+        cmds_b[:, 0] =  -cmds[:, 1]   # body X  <= forward
+        cmds_b[:, 1] = -cmds[:, 0]   # body Y  <= - right  (because +Y left in Isaac)
+        cmds_b[:, 2] =  cmds[:, 2]   # yaw (flip sign later if needed)
+        self._commands[env_ids] = cmds_b
 
 
         # Reset robot state at env origins

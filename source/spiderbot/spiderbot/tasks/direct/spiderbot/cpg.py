@@ -70,10 +70,16 @@ class SpiderCPG:
         # TROT GAIT: Diagonal legs move together (FL+RR, FR+RL)
         # ====================================================================
         # Base phases for 4 legs
-        leg_phases = torch.tensor([0.0, math.pi, 0.0, math.pi], device=device)
+        leg_phases = torch.tensor([0.0, math.pi, math.pi, 0.0], device=device)
+        intra = torch.tensor([
+            0.0,  +0.5*math.pi,  +0.5*math.pi,   # FL: coxa, femur, tibia
+            0.0,  +0.5*math.pi,  +0.5*math.pi,   # FR
+            0.0,  +0.5*math.pi,  +0.5*math.pi,   # RL
+            0.0,  +0.5*math.pi,  +0.5*math.pi,   # RR
+        ], device=device).unsqueeze(0)
         
         # Expand to 12 joints (each leg has 3 joints: coxa, femur, tibia)
-        self.default_joint_phases = leg_phases.repeat_interleave(3).unsqueeze(0)  # (1,12)
+        self.default_joint_phases = leg_phases.repeat_interleave(3).unsqueeze(0) + intra # (1,12)
         
         # ====================================================================
         # JOINT-SPECIFIC AMPLITUDE SCALING
@@ -137,6 +143,20 @@ class SpiderCPG:
         Returns:
             (N,12) joint position deltas
         """
+
+
+        # Softly couple diagonal pairs: (FL, RR) and (FR, RL)
+        k = 0.7  # 0=no coupling, 1=hard tie
+        phi = leg_phase_offsets  # (N,4) [FL, FR, RL, RR]
+
+        phi_diag0 = 0.5 * (phi[:, 0:1] + phi[:, 3:4])  # FL & RR
+        phi_diag1 = 0.5 * (phi[:, 1:2] + phi[:, 2:3])  # FR & RL
+
+        phi_coupled = torch.cat([phi_diag0, phi_diag1, phi_diag1, phi_diag0], dim=1)
+        leg_phase_offsets = (1 - k) * phi + k * phi_coupled
+
+
+
         # Expand leg phases to joint phases
         joint_phases = leg_phase_offsets.repeat_interleave(3, dim=1)  # (N,12)
         joint_phases = joint_phases + self.default_joint_phases        # Add trot pattern
