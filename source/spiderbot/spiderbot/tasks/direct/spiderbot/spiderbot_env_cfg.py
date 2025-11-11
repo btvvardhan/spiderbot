@@ -124,25 +124,3 @@ class SpiderbotEnvCfg(DirectRLEnvCfg):
     flat_orientation_reward_scale = -5.0
 
 
-# spiderbot_env_cfg.py (add near bottom)
-
-# @configclass
-# class CurriculumCfg:
-#     # thresholds are in [0,1] because we divide by each term's scale to recover the raw exp(.) avg
-#     forward_success_threshold: float = 0.70
-#     yaw_success_threshold: float = 0.65
-#     lateral_success_threshold: float = 0.60
-#     # min episodes before considering promotion
-#     min_stage_episodes: int = 150
-#     # rehearsal (mixing) probabilities per stage (index by stage, fallback to last)
-#     mix_prev_probs: tuple[float, ...] = (0.0, 0.30, 0.30, 0.25)
-
-#     # command ranges per stage
-#     vx_ranges = ((0.15, 0.30), (0.10, 0.25), (0.08, 0.25), (-0.50, 0.50))
-#     vy_ranges = ((0.00, 0.00), (0.00, 0.00), (-0.15, 0.15), (-0.20, 0.20))
-#     yaw_ranges = ((0.00, 0.00), (-0.30, 0.30), (-0.25, 0.25), (-0.70, 0.70))
-
-# @configclass
-# class SpiderbotEnvCfg(DirectRLEnvCfg):
-#     ...
-#     curriculum: CurriculumCfg = CurriculumCfg()
