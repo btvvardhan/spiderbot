@@ -125,7 +125,7 @@ class SpiderbotEnv(DirectRLEnv):
         if stage == 0:  # forward
             cmds[:, 0] = 0.3;  cmds[:, 1] = 0.0;  cmds[:, 2] = 0.0
         elif stage == 1:  # backward
-            cmds[:, 0] = -0.3; cmds[:, 1] = 0.0;  cmds[:, 2] = 0.0
+            cmds[:, 0] = 0.3; cmds[:, 1] = 0.0;  cmds[:, 2] = 0.2
         elif stage == 2:  # right strafe
             cmds[:, 0] = 0.0;  cmds[:, 1] = +0.3; cmds[:, 2] = 0.0
         elif stage == 3:  # left strafe
