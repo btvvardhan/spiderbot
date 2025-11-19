@@ -59,8 +59,11 @@ class SpiderbotEnv(DirectRLEnv):
         self._episode_sums = {
             key: torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
             for key in [
-                "track_lin_vel_xy_exp",
+                "track_lin_vel_x_exp",
+                "track_lin_vel_y_exp",
+                "lateral_drift_l2",
                 "track_ang_vel_z_exp",
+                "yaw_drift_l2",
                 "lin_vel_z_l2",
                 "ang_vel_xy_l2",
                 "dof_torques_l2",
@@ -157,12 +160,25 @@ class SpiderbotEnv(DirectRLEnv):
         return observations
 
     def _get_rewards(self) -> torch.Tensor:
-        # linear velocity tracking
-        lin_vel_error = torch.sum(torch.square(self._commands[:, :2] - self._robot.data.root_lin_vel_b[:, :2]), dim=1)
-        lin_vel_error_mapped = torch.exp(-lin_vel_error / 0.25)
+        # Separate x and y velocity tracking for better control
+        lin_vel_x_error = torch.square(self._commands[:, 0] - self._robot.data.root_lin_vel_b[:, 0])
+        lin_vel_x_mapped = torch.exp(-lin_vel_x_error / 0.25)
+        
+        lin_vel_y_error = torch.square(self._commands[:, 1] - self._robot.data.root_lin_vel_b[:, 1])
+        lin_vel_y_mapped = torch.exp(-lin_vel_y_error / 0.25)
+        
+        # Explicit lateral drift penalty (punish ANY y-velocity when command is near zero)
+        lateral_drift = torch.square(self._robot.data.root_lin_vel_b[:, 1])
+        lateral_drift_penalty = lateral_drift * (torch.abs(self._commands[:, 1]) < 0.05).float()
+        
         # yaw rate tracking
         yaw_rate_error = torch.square(self._commands[:, 2] - self._robot.data.root_ang_vel_b[:, 2])
         yaw_rate_error_mapped = torch.exp(-yaw_rate_error / 0.25)
+        
+        # Explicit yaw drift penalty (punish ANY yaw rotation when command is near zero)
+        yaw_drift = torch.square(self._robot.data.root_ang_vel_b[:, 2])
+        yaw_drift_penalty = yaw_drift * (torch.abs(self._commands[:, 2]) < 0.05).float()
+        
         # z velocity tracking
         z_vel_error = torch.square(self._robot.data.root_lin_vel_b[:, 2])
         # angular velocity x/y
@@ -178,8 +194,11 @@ class SpiderbotEnv(DirectRLEnv):
         
 
         rewards = {
-            "track_lin_vel_xy_exp": lin_vel_error_mapped * self.cfg.lin_vel_reward_scale * self.step_dt,
+            "track_lin_vel_x_exp": lin_vel_x_mapped * self.cfg.lin_vel_x_reward_scale * self.step_dt,
+            "track_lin_vel_y_exp": lin_vel_y_mapped * self.cfg.lin_vel_y_reward_scale * self.step_dt,
+            "lateral_drift_l2": lateral_drift_penalty * self.cfg.lateral_drift_penalty_scale * self.step_dt,
             "track_ang_vel_z_exp": yaw_rate_error_mapped * self.cfg.yaw_rate_reward_scale * self.step_dt,
+            "yaw_drift_l2": yaw_drift_penalty * self.cfg.yaw_drift_penalty_scale * self.step_dt,
             "lin_vel_z_l2": z_vel_error * self.cfg.z_vel_reward_scale * self.step_dt,
             "ang_vel_xy_l2": ang_vel_error * self.cfg.ang_vel_reward_scale * self.step_dt,
             "dof_torques_l2": joint_torques * self.cfg.joint_torque_reward_scale * self.step_dt,
@@ -300,4 +319,3 @@ class SpiderbotEnv(DirectRLEnv):
         extras = dict()
         extras["Episode_Termination/time_out"] = torch.count_nonzero(self.reset_time_outs[env_ids]).item()
         self.extras["log"].update(extras)
-    

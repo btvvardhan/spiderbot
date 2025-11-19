@@ -114,13 +114,14 @@ class SpiderbotEnvCfg(DirectRLEnvCfg):
     cpg_phase_max = +3.14156
 
     # Reward scales
-    lin_vel_reward_scale = 5.0
-    yaw_rate_reward_scale = 1.5
+    lin_vel_x_reward_scale = 5.0        # Reward for tracking forward velocity
+    lin_vel_y_reward_scale = 5.0        # Reward for tracking lateral velocity
+    lateral_drift_penalty_scale = -8.0  # STRICT penalty for unwanted lateral drift
+    yaw_rate_reward_scale = 1.5         # Reward for tracking yaw rate
+    yaw_drift_penalty_scale = -3.0      # STRICT penalty for unwanted yaw drift
     z_vel_reward_scale = -2.0
-    ang_vel_reward_scale = -0.05
+    ang_vel_reward_scale = -0.08        # Increased from -0.05 for stricter roll/pitch control
     joint_torque_reward_scale = -1e-5
     joint_accel_reward_scale = -5e-7
     action_rate_reward_scale = -0.01
-    flat_orientation_reward_scale = -5.0
-
-
+    flat_orientation_reward_scale = -8.0  # Increased from -5.0 for stricter orientation control
