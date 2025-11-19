@@ -1,4 +1,5 @@
-"""Environment configuration for Spider Bot CPG-RL training."""
+# spiderbot_env_cfg_.py
+""" environment configuration with bias mitigation and better curriculum."""
 
 import isaaclab.envs.mdp as mdp
 import isaaclab.sim as sim_utils
@@ -11,14 +12,13 @@ from isaaclab.terrains import TerrainImporterCfg
 from isaaclab.utils import configclass
 from isaaclab.sensors import ContactSensorCfg
 
-# ✅ Import your robot config
 from .spiderbot_cfg import SPIDERBOT_CFG
 
 
 @configclass
 class EventCfg:
-    """Random events during training."""
-    
+    """Configuration for randomization."""
+
     physics_material = EventTerm(
         func=mdp.randomize_rigid_body_material,
         mode="startup",
@@ -40,21 +40,38 @@ class EventCfg:
             "operation": "add",
         },
     )
+    
+    # ✅ NEW: Add joint friction randomization
+    joint_friction = EventTerm(
+        func=mdp.randomize_actuator_gains,
+        mode="startup",
+        params={
+            "asset_cfg": SceneEntityCfg("robot", joint_names=".*"),
+            "stiffness_distribution_params": (0.75, 1.5),  # Use this instead of stiffness_range
+            "damping_distribution_params": (0.75, 1.5),    # Use this instead of damping_range
+            "operation": "scale",
+            "distribution": "log_uniform",
+        },
+    )
 
 
 @configclass
 class SpiderbotEnvCfg(DirectRLEnvCfg):
-    """Configuration for Spider Bot CPG-RL environment."""
+    """ configuration for Spider Bot with bias mitigation."""
     
     # Environment settings
     episode_length_s = 20.0
     decimation = 4
     
     # Action/observation spaces
-    action_space = 17      # 1 freq + 12 amp + 4 phase
-    observation_space = 53
+    action_space = 17       # 1 freq + 12 amp + 4 phase
+    observation_space = 54  # +1 for curriculum level
     state_space = 0
     action_scale = 1.0
+    
+    # ✅ NEW: Training improvements
+    add_action_noise = True  # Add small noise to break symmetry
+    use_adaptive_smoothing = True  # Curriculum-based smoothing
 
     # Simulation
     sim: SimulationCfg = SimulationCfg(
@@ -67,13 +84,21 @@ class SpiderbotEnvCfg(DirectRLEnvCfg):
             dynamic_friction=1.0,
             restitution=0.0,
         ),
+        # ✅ : Better physics simulation
+        physx=sim_utils.PhysxCfg(
+            solver_type=1,  # TGS solver for better stability
+            enable_stabilization=True,
+            bounce_threshold_velocity=0.2,
+            friction_offset_threshold=0.04,
+            friction_correlation_distance=0.025,
+        ),
     )
     
     # Terrain
     terrain = TerrainImporterCfg(
         prim_path="/World/ground",
         terrain_type="plane",
-        collision_group=0,  # ✅ Enable collisions (not -1)
+        collision_group=0,
         physics_material=sim_utils.RigidBodyMaterialCfg(
             friction_combine_mode="multiply",
             restitution_combine_mode="multiply",
@@ -102,26 +127,87 @@ class SpiderbotEnvCfg(DirectRLEnvCfg):
     # Events
     events: EventCfg = EventCfg()
 
-    # ✅ Robot - Clean and simple!
+    # Robot
     robot = SPIDERBOT_CFG.replace(prim_path="/World/envs/env_.*/Robot")
 
-    # CPG parameters
-    cpg_frequency_min = 0.0
-    cpg_frequency_max = 3.0
-    cpg_amplitude_min = 0.0
-    cpg_amplitude_max = 0.6
-    cpg_phase_min = -3.14156
-    cpg_phase_max = +3.14156
+    # ✅ : CPG parameters with better ranges
+    cpg_frequency_min = 0.5   # Higher minimum for stability
+    cpg_frequency_max = 2.5   # Lower maximum to prevent instability
+    cpg_amplitude_min = 0.05  # Small minimum to maintain motion
+    cpg_amplitude_max = 0.5   # Reduced max for control
+    cpg_phase_min = -2.0      # Reduced range for easier learning
+    cpg_phase_max = +2.0
 
-    # Reward scales
-    lin_vel_x_reward_scale = 5.0        # Reward for tracking forward velocity
-    lin_vel_y_reward_scale = 5.0        # Reward for tracking lateral velocity
-    lateral_drift_penalty_scale = -8.0  # STRICT penalty for unwanted lateral drift
-    yaw_rate_reward_scale = 1.5         # Reward for tracking yaw rate
-    yaw_drift_penalty_scale = -3.0      # STRICT penalty for unwanted yaw drift
-    z_vel_reward_scale = -2.0
-    ang_vel_reward_scale = -0.08        # Increased from -0.05 for stricter roll/pitch control
-    joint_torque_reward_scale = -1e-5
-    joint_accel_reward_scale = -5e-7
-    action_rate_reward_scale = -0.01
-    flat_orientation_reward_scale = -8.0  # Increased from -5.0 for stricter orientation control
+    # ✅ : Reward scales with better balance
+    # Primary tracking rewards (increased importance)
+    lin_vel_x_reward_scale = 8.0        # Increased for stronger forward motion incentive
+    lin_vel_y_reward_scale = 6.0        # Slightly less than forward
+    yaw_rate_reward_scale = 3.0         # Doubled for better yaw tracking
+    
+    # Drift penalties (stronger to prevent unwanted motion)
+    lateral_drift_penalty_scale = -10.0  # Stronger lateral drift penalty
+    yaw_drift_penalty_scale = -5.0       # Stronger yaw drift penalty
+    
+    # Stability rewards
+    z_vel_reward_scale = -3.0           # Increased for better vertical stability
+    ang_vel_reward_scale = -0.1         # Stronger roll/pitch penalty
+    flat_orientation_reward_scale = -10.0  # Strong upright incentive
+    
+    # Efficiency penalties (reduced to allow more exploration)
+    joint_torque_reward_scale = -5e-6    # Reduced by half
+    joint_accel_reward_scale = -2.5e-7   # Reduced by half
+    action_rate_reward_scale = -0.005    # Reduced for more dynamic motion
+    
+    # ✅ NEW: Symmetry rewards
+    yaw_symmetry_reward_scale = 2.0      # Reward balanced yaw behavior
+    leg_symmetry_reward_scale = -0.05    # Penalize asymmetric gaits
+
+    # ✅ NEW: Curriculum parameters
+    curriculum_success_threshold = 0.7   # Success rate to advance level
+    curriculum_window_size = 100         # Episodes to average over
+    curriculum_max_level = 3             # Maximum difficulty level
+
+
+@configclass
+class TrainingConfig:
+    """Training hyperparameters for  convergence."""
+    
+    # PPO parameters
+    learning_rate = 3e-4
+    lr_schedule = "adaptive"  # Reduce LR when plateauing
+    
+    # Batch sizes
+    num_envs = 2048          # More envs for better statistics
+    minibatch_size = 64
+    
+    # Training length
+    max_iterations = 5000
+    
+    # Entropy regularization (important for exploration)
+    entropy_coef = 0.01      # Increased for more exploration
+    
+    # Gradient clipping
+    max_grad_norm = 1.0
+    
+    # Value function
+    vf_coef = 0.5
+    vf_clip_param = 10.0
+    
+    # PPO clip
+    clip_param = 0.2
+    
+    # GAE
+    gamma = 0.99
+    gae_lambda = 0.95
+    
+    # Network architecture
+    hidden_dims = [256, 256, 128]  # Deeper network
+    activation = "elu"              # ELU often works better than ReLU
+    
+    # Normalization
+    normalize_obs = True
+    normalize_rewards = True
+    
+    # ✅ NEW: Symmetry-specific training
+    use_symmetric_sampling = True   # Sample equal left/right turns
+    augment_with_mirror = True      # Add mirrored experiences
