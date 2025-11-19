@@ -43,7 +43,7 @@ class SpiderCPG:
       - Amplitude coupling strength k_amp   (0..1)
     Set k_phase=k_amp=1.0 to make diagonals move exactly the same way.
     """
-    def __init__(self, num_envs: int, dt: float, device: str, k_phase: float = 0.7, k_amp: float = 1.0):
+    def __init__(self, num_envs: int, dt: float, device: str, k_phase: float = 1.0, k_amp: float = 1.0):
         self.num_envs = num_envs
         self.dt = dt
         self.device = device
@@ -66,10 +66,10 @@ class SpiderCPG:
 
         # Joint-type scaling [coxa, femur, tibia] × 4 legs
         self.joint_type_scales = torch.tensor([
-            1.0, 0.3, 0.2,
-            1.0, 0.3, 0.2,
-            1.0, 0.3, 0.2,
-            1.0, 0.3, 0.2,
+            0.8, 0.3, 0.2,
+            0.8, 0.3, 0.2,
+            0.8, 0.3, 0.2,
+            0.8, 0.3, 0.2,
         ], device=device).unsqueeze(0)  # (1,12)
 
     def reset(self, env_ids: torch.Tensor):
