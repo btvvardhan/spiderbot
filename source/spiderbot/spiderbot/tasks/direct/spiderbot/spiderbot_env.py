@@ -251,7 +251,7 @@ class SpiderbotEnv(DirectRLEnv):
     
         # Sample new commands per curriculum
         cmds = torch.zeros_like(self._commands[env_ids])
-        self.curriculum_level = 3
+        self.curriculum_level = 0
         if self.curriculum_level == 0:
             cmds[:, 0] = 0.3; 
             cmds[:, 1] = 0.0; 
@@ -265,7 +265,7 @@ class SpiderbotEnv(DirectRLEnv):
             cmds[:, 1] = 0.0; 
             cmds[:, 2].uniform_(-0.1, 0.1)
         else:
-            cmds[:, 0].uniform_(-0.5, 0.5); 
+            cmds[:, 0].uniform_(0.0, 0.5); 
             cmds[:, 1].uniform_(-0.1, 0.1); 
             cmds[:, 2].uniform_(-0.3, 0.3)
             

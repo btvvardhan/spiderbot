@@ -110,8 +110,8 @@ class SpiderbotEnvCfg(DirectRLEnvCfg):
     cpg_frequency_max = 3.0
     cpg_amplitude_min = 0.0
     cpg_amplitude_max = 0.6
-    cpg_phase_min = -1.2
-    cpg_phase_max = +1.2
+    cpg_phase_min = -3.14156
+    cpg_phase_max = +3.14156
 
     # Reward scales
     lin_vel_reward_scale = 5.0
