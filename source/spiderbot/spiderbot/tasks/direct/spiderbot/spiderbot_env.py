@@ -370,8 +370,8 @@ class SpiderbotEnv(DirectRLEnv):
                 cmds[i, 2] = torch.empty(1).uniform_(-0.2, 0.2).item()
                 
             else:  # level == 3: Full capability
-                cmds[i, 0] = torch.empty(1).uniform_(-0.2, 0.5).item()
-                cmds[i, 1] = torch.empty(1).uniform_(-0.1, 0.1).item()
+                cmds[i, 0] = torch.empty(1).uniform_(-0.5, 0.5).item()
+                cmds[i, 1] = torch.empty(1).uniform_(-0.2, 0.2).item()
                 # ✅ Ensure symmetric yaw distribution
                 cmds[i, 2] = torch.empty(1).uniform_(-0.3, 0.3).item()
         
