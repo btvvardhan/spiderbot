@@ -16,7 +16,7 @@ from isaaclab.terrains import TerrainImporterCfg
 from isaaclab.utils import configclass
 from isaaclab.sensors import ContactSensorCfg
 from isaaclab.actuators import ImplicitActuatorCfg
-
+from .spiderbot_cfg import SPIDERBOT_CFG
 
 
 @configclass
