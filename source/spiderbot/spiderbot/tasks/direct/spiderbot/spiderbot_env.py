@@ -1,3 +1,4 @@
+
 # Spiderbot_env.py
 # Copyright (c) 2022-2025, The Isaac Lab Project Developers.
 # All rights reserved.
@@ -19,33 +20,30 @@ from .spiderbot_env_cfg import SpiderbotEnvCfg
 
 
 class SpiderbotEnv(DirectRLEnv):
-    """Isaac Lab DirectRLEnv for Spiderbot.
-
-    Key differences from the previous version:
-    - Observation is **commands-only** (+ optional history & phase), so deployment requires no sensors.
-    - Actuation targets the 12 leg joints defined in the new URDF (configured in SPIDERBOT_CFG).
-    - Termination is triggered by **base_link** contact force (no false-positives on feet).
-    """
+    """Isaac Lab DirectRLEnv for Spiderbot with commands-only observation and robust terminations."""
     cfg: SpiderbotEnvCfg
 
     def __init__(self, cfg: SpiderbotEnvCfg, render_mode: str | None = None, **kwargs):
         super().__init__(cfg, render_mode, **kwargs)
 
-        # Action buffers (joint position targets as offsets from default positions)
+        # Actions: joint position targets (delta from defaults)
         self._actions = torch.zeros(self.num_envs, gym.spaces.flatdim(self.single_action_space), device=self.device)
         self._previous_actions = torch.zeros_like(self._actions)
 
-        # Command buffer: [Vx, Vy, YawRate]
+        # Commands: [Vx, Vy, YawRate]
         self._commands = torch.zeros(self.num_envs, 3, device=self.device)
 
-        # === Commands-only observation helpers ===
+        # Commands-only observation helpers
         self._H = int(getattr(self.cfg, "cmd_history_len", 9))
         self._use_phase = bool(getattr(self.cfg, "use_phase", True))
-        self._phase = torch.zeros(self.num_envs, 1, device=self.device)
+        self._use_cmds_only_obs = bool(getattr(self.cfg, "use_commands_only_obs", True))
         self._cmd_hist = torch.zeros(self.num_envs, self._H, 3, device=self.device)
+        self._phase = torch.zeros(self.num_envs, 1, device=self.device)
+        self._cmd_timer = torch.zeros(self.num_envs, 1, device=self.device)
 
-        # Body ids resolved in _setup_scene (after sensors are created)
-        self._base_body_ids = None
+        # Indices for terminations/rewards (resolved after sensor creation)
+        self._base_id = None
+        self._feet_ids = None
 
         # Logging
         self._episode_sums = {
@@ -59,6 +57,9 @@ class SpiderbotEnv(DirectRLEnv):
                 "dof_acc_l2",
                 "action_rate_l2",
                 "flat_orientation_l2",
+                "pen_base_contact",
+                "pen_low_height",
+                "stance_contacts",
             ]
         }
 
@@ -89,7 +90,11 @@ class SpiderbotEnv(DirectRLEnv):
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
         light_cfg.func("/World/Light", light_cfg)
 
-        # Don't resolve body indices here - wait until post_initialization
+        # Resolve body indices for base and feet
+        self._base_id, _ = self._contact_sensor.find_bodies("base_link")
+        self._feet_ids, _ = self._contact_sensor.find_bodies(
+            ["fl_tibia_link", "fr_tibia_link", "rl_tibia_link", "rr_tibia_link"]
+        )
 
     # ---------------------------------------------------------------------
     # Control and physics
@@ -99,18 +104,23 @@ class SpiderbotEnv(DirectRLEnv):
         self._actions = actions.clone()
         self._processed_actions = self.cfg.action_scale * self._actions + self._robot.data.default_joint_pos
 
-        # === Advance open-loop phase (no sensors required) ===
+        # Advance open-loop phase (optional)
         if self._use_phase:
-            base_hz = float(getattr(self.cfg, "phase_base_hz", 1.5))
-            kv = float(getattr(self.cfg, "phase_k_v", 1.0))
             speed = torch.norm(self._commands[:, :2], dim=1, keepdim=True)  # m/s
-            freq = base_hz + kv * speed  # Hz
+            freq = float(self.cfg.phase_base_hz) + float(self.cfg.phase_k_v) * speed
             self._phase = (self._phase + 2.0 * math.pi * freq * self.step_dt) % (2.0 * math.pi)
 
-        # === Roll command history (latest at index 0) ===
+        # Roll command history (latest at index 0)
         if self._H > 0:
             self._cmd_hist = torch.roll(self._cmd_hist, shifts=1, dims=1)
             self._cmd_hist[:, 0, :] = self._commands
+
+        # Mid-episode command resampling for omni-direction
+        self._cmd_timer += self.step_dt
+        if self._cmd_timer[:, 0].max() >= float(self.cfg.cmd_hold_time_s):
+            mask = self._cmd_timer[:, 0] >= float(self.cfg.cmd_hold_time_s)
+            self._sample_commands(mask)
+            self._cmd_timer[mask, 0] = 0.0
 
     def _apply_action(self):
         self._robot.set_joint_position_target(self._processed_actions)
@@ -121,44 +131,94 @@ class SpiderbotEnv(DirectRLEnv):
     def _get_observations(self) -> dict:
         self._previous_actions = self._actions.clone()
 
-        parts = [self._commands]
-        if self._H > 0:
-            parts.append(self._cmd_hist.reshape(self.num_envs, -1))
-        if self._use_phase:
-            parts += [torch.sin(self._phase), torch.cos(self._phase)]
+        if self._use_cmds_only_obs:
+            parts = [self._commands]
+            if self._H > 0:
+                parts.append(self._cmd_hist.reshape(self.num_envs, -1))
+            if self._use_phase:
+                parts += [torch.sin(self._phase), torch.cos(self._phase)]
+            obs = torch.cat(parts, dim=-1)
+            return {"policy": obs}
 
-        obs = torch.cat(parts, dim=-1)
+        # Fallback: rich observation (not used for deploy)
+        obs = torch.cat(
+            [
+                tensor
+                for tensor in (
+                    self._robot.data.root_lin_vel_b,
+                    self._robot.data.root_ang_vel_b,
+                    self._robot.data.projected_gravity_b,
+                    self._commands,
+                    self._robot.data.joint_pos - self._robot.data.default_joint_pos,
+                    self._robot.data.joint_vel,
+                    self._actions,
+                )
+                if tensor is not None
+            ],
+            dim=-1,
+        )
         return {"policy": obs}
 
     # ---------------------------------------------------------------------
     # Rewards / Dones
     # ---------------------------------------------------------------------
     def _get_rewards(self) -> torch.Tensor:
-        # NOTE: Rewards can use privileged sim state; these are NOT fed to the policy.
-        lin_vel_error = torch.sum(torch.square(self._commands[:, :2] - self._robot.data.root_lin_vel_b[:, :2]), dim=1)
+        # Privileged signals (not observed by policy)
+        root_lin_b = self._robot.data.root_lin_vel_b
+        root_ang_b = self._robot.data.root_ang_vel_b
+        g_b = self._robot.data.projected_gravity_b
+        base_height = self._robot.data.root_pos_w[:, 2]
+
+        # Contact forces (current step = last in history)
+        netF_hist = self._contact_sensor.data.net_forces_w_history  # [E, H, B, 3]
+        F_now = netF_hist[:, -1, :, :]                               # [E, B, 3]
+        # Base contact magnitude
+        baseF = torch.norm(F_now[:, self._base_id, :], dim=-1).max(dim=1).values if self._base_id.numel() > 1 \
+                else torch.norm(F_now[:, self._base_id, :], dim=-1).squeeze(-1)
+        # Feet contact magnitudes
+        feetF = torch.norm(F_now[:, self._feet_ids, :], dim=-1) if self._feet_ids.numel() > 0 \
+                else torch.zeros(self.num_envs, 0, device=self.device)
+
+        # ====== Original tracking and regularization terms ======
+        lin_vel_error = torch.sum(torch.square(self._commands[:, :2] - root_lin_b[:, :2]), dim=1)
         lin_vel_error_mapped = torch.exp(-lin_vel_error / 0.25)
-
-        yaw_rate_error = torch.square(self._commands[:, 2] - self._robot.data.root_ang_vel_b[:, 2])
+        yaw_rate_error = torch.square(self._commands[:, 2] - root_ang_b[:, 2])
         yaw_rate_error_mapped = torch.exp(-yaw_rate_error / 0.25)
-
-        z_vel_error = torch.square(self._robot.data.root_lin_vel_b[:, 2])
-        ang_vel_error = torch.sum(torch.square(self._robot.data.root_ang_vel_b[:, :2]), dim=1)
-
+        z_vel_error = torch.square(root_lin_b[:, 2])
+        ang_vel_error = torch.sum(torch.square(root_ang_b[:, :2]), dim=1)
         joint_torques = torch.sum(torch.square(self._robot.data.applied_torque), dim=1)
         joint_accel = torch.sum(torch.square(self._robot.data.joint_acc), dim=1)
-
         action_rate = torch.sum(torch.square(self._actions - self._previous_actions), dim=1)
-        flat_orientation = torch.sum(torch.square(self._robot.data.projected_gravity_b[:, :2]), dim=1)
+        flat_orientation = torch.sum(torch.square(g_b[:, :2]), dim=1)
+
+        # ====== New anti-belly-sledding terms ======
+        # 1) Penalize base contact
+        base_contact_pen = baseF * float(self.cfg.base_contact_penalty_scale)
+
+        # 2) Penalize low base height
+        height_deficit = torch.clamp(self.cfg.base_height_target - base_height, min=0.0)
+        low_height_pen = height_deficit * float(self.cfg.base_height_low_penalty_scale)
+
+        # 3) Encourage stance contacts (0..1 scale by fraction of feet in contact)
+        if feetF.numel() > 0:
+            feet_contact = (feetF > float(self.cfg.foot_contact_force_thresh)).float()
+            stance_frac = torch.mean(feet_contact, dim=1)
+            stance_reward = stance_frac * float(self.cfg.stance_contact_reward_scale)
+        else:
+            stance_reward = torch.zeros(self.num_envs, device=self.device)
 
         rewards = {
             "track_lin_vel_xy_exp": lin_vel_error_mapped * self.cfg.lin_vel_reward_scale * self.step_dt,
-            "track_ang_vel_z_exp": yaw_rate_error_mapped * self.cfg.yaw_rate_reward_scale * self.step_dt,
-            "lin_vel_z_l2": z_vel_error * self.cfg.z_vel_reward_scale * self.step_dt,
-            "ang_vel_xy_l2": ang_vel_error * self.cfg.ang_vel_reward_scale * self.step_dt,
-            "dof_torques_l2": joint_torques * self.cfg.joint_torque_reward_scale * self.step_dt,
-            "dof_acc_l2": joint_accel * self.cfg.joint_accel_reward_scale * self.step_dt,
-            "action_rate_l2": action_rate * self.cfg.action_rate_reward_scale * self.step_dt,
-            "flat_orientation_l2": flat_orientation * self.cfg.flat_orientation_reward_scale * self.step_dt,
+            "track_ang_vel_z_exp":  yaw_rate_error_mapped * self.cfg.yaw_rate_reward_scale * self.step_dt,
+            "lin_vel_z_l2":         z_vel_error * self.cfg.z_vel_reward_scale * self.step_dt,
+            "ang_vel_xy_l2":        ang_vel_error * self.cfg.ang_vel_reward_scale * self.step_dt,
+            "dof_torques_l2":       joint_torques * self.cfg.joint_torque_reward_scale * self.step_dt,
+            "dof_acc_l2":           joint_accel * self.cfg.joint_accel_reward_scale * self.step_dt,
+            "action_rate_l2":       action_rate * self.cfg.action_rate_reward_scale * self.step_dt,
+            "flat_orientation_l2":  flat_orientation * self.cfg.flat_orientation_reward_scale * self.step_dt,
+            "pen_base_contact":     base_contact_pen * self.step_dt,
+            "pen_low_height":       low_height_pen * self.step_dt,
+            "stance_contacts":      stance_reward * self.step_dt,
         }
         reward = torch.sum(torch.stack(list(rewards.values())), dim=0)
 
@@ -170,16 +230,33 @@ class SpiderbotEnv(DirectRLEnv):
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
         time_out = self.episode_length_buf >= self.max_episode_length - 1
 
-        # Fallen if base link contacts the world with significant force
-        died = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
-        if self._base_body_ids is not None:
-            net_contact_forces = self._contact_sensor.data.net_forces_w_history  # [E, H, B, 3]
-            base_forces = net_contact_forces[:, :, self._base_body_ids, :]       # [E, H, K, 3]
-            force_norm = torch.norm(base_forces, dim=-1)                         # [E, H, K]
-            max_over_hist, _ = torch.max(force_norm, dim=1)                      # [E, K]
-            max_over_bodies, _ = torch.max(max_over_hist, dim=1)                 # [E]
-            died = max_over_bodies > getattr(self.cfg, "base_contact_terminate_force", 1.0)
+        # Robust died conditions
+        g_b = self._robot.data.projected_gravity_b
+        cos_tilt = (-g_b[:, 2]).clamp(-1.0, 1.0)      # -gz ~ 1 when upright
+        cos_max = torch.cos(torch.deg2rad(torch.tensor(self.cfg.max_tilt_angle_deg, device=self.device)))
+        too_tilted = cos_tilt < cos_max
 
+        base_height = self._robot.data.root_pos_w[:, 2]
+        too_low = base_height < float(self.cfg.min_base_height)
+
+        # Base link contact force over threshold
+        netF_hist = self._contact_sensor.data.net_forces_w_history
+        F_now = netF_hist[:, -1, :, :]
+        baseF = torch.norm(F_now[:, self._base_id, :], dim=-1).max(dim=1).values if self._base_id.numel() > 1 \
+                else torch.norm(F_now[:, self._base_id, :], dim=-1).squeeze(-1)
+        base_contact = baseF > float(self.cfg.base_contact_force_thresh)
+
+        # Joint angle sanity (optional guard)
+        joint_pos = self._robot.data.joint_pos
+        joint_violation = torch.any(torch.abs(joint_pos) > float(self.cfg.joint_pos_limit_rad), dim=1)
+
+        # NaN/Inf guard
+        def _bad(t):
+            t = t.view(self.num_envs, -1)
+            return torch.isnan(t).any(dim=1) | torch.isinf(t).any(dim=1)
+        bad_state = _bad(self._robot.data.joint_pos) | _bad(self._robot.data.root_lin_vel_b) | _bad(self._actions)
+
+        died = too_tilted | too_low | base_contact | joint_violation | bad_state
         return died, time_out
 
     # ---------------------------------------------------------------------
@@ -188,10 +265,6 @@ class SpiderbotEnv(DirectRLEnv):
     def _reset_idx(self, env_ids: torch.Tensor | None):
         if env_ids is None or len(env_ids) == self.num_envs:
             env_ids = self._robot._ALL_INDICES
-
-        # Resolve base body IDs on first reset (sensor is now initialized)
-        if self._base_body_ids is None:
-            self._base_body_ids, _ = self._contact_sensor.find_bodies("base_link")
 
         self._robot.reset(env_ids)
         super()._reset_idx(env_ids)
@@ -203,18 +276,15 @@ class SpiderbotEnv(DirectRLEnv):
         # Clear actions/history/phase
         self._actions[env_ids] = 0.0
         self._previous_actions[env_ids] = 0.0
+        self._cmd_timer[env_ids] = 0.0
         if self._H > 0:
             self._cmd_hist[env_ids] = 0.0
         self._phase[env_ids] = 0.0
 
-        # Sample new commands for walking (vx forward, small yaw)
-        cmds = torch.zeros_like(self._commands[env_ids])
-        cmds[:, 0].uniform_(0.0, 0.0)   # vx in m/s
-        cmds[:, 1] = 0.0                  # vy
-        cmds[:, 2].uniform_(-0.0, 0.0)    # yaw rate
-        self._commands[env_ids] = cmds
+        # Sample fresh omni-direction commands
+        self._sample_commands(env_ids)
         if self._H > 0:
-            self._cmd_hist[env_ids, 0, :] = cmds
+            self._cmd_hist[env_ids, 0, :] = self._commands[env_ids]
 
         # Reset robot state
         joint_pos = self._robot.data.default_joint_pos[env_ids]
@@ -245,3 +315,23 @@ class SpiderbotEnv(DirectRLEnv):
         """Set per-env velocity commands (shape: [num_envs, 3])."""
         assert vx_vy_yaw.shape == self._commands.shape
         self._commands[:] = vx_vy_yaw.to(self._commands.device)
+
+    # Helper to sample omni-direction commands
+    def _sample_commands(self, env_selector):
+        if isinstance(env_selector, torch.Tensor) and env_selector.dtype == torch.bool:
+            mask = env_selector
+            idx = torch.nonzero(mask, as_tuple=False).squeeze(-1)
+        else:
+            idx = env_selector if isinstance(env_selector, torch.Tensor) else torch.as_tensor(env_selector, device=self.device)
+
+        if idx.numel() == 0:
+            return
+
+        vx_min, vx_max = self.cfg.cmd_vx_range
+        vy_min, vy_max = self.cfg.cmd_vy_range
+        wz_min, wz_max = self.cfg.cmd_yaw_range
+        cmds = torch.zeros(idx.numel(), 3, device=self.device)
+        cmds[:, 0].uniform_(float(vx_min), float(vx_max))
+        cmds[:, 1].uniform_(float(vy_min), float(vy_max))
+        cmds[:, 2].uniform_(float(wz_min), float(wz_max))
+        self._commands[idx] = cmds

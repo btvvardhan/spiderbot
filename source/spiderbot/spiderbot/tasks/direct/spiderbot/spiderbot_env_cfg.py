@@ -1,3 +1,4 @@
+
 # spiderbot_env_cfg.py
 # Copyright (c) 2022-2025, The Isaac Lab Project Developers.
 # All rights reserved.
@@ -20,9 +21,10 @@ from .spiderbot_cfg import SPIDERBOT_CFG
 
 @configclass
 class EventCfg:
-    """Configuration for randomization."""
+    """Configuration for randomization/materials."""
 
-    physics_material = EventTerm(
+    # Default material on all bodies
+    physics_material_all = EventTerm(
         func=mdp.randomize_rigid_body_material,
         mode="startup",
         params={
@@ -30,9 +32,40 @@ class EventCfg:
             "static_friction_range": (0.8, 0.8),
             "dynamic_friction_range": (0.6, 0.6),
             "restitution_range": (0.0, 0.0),
-            "num_buckets": 64,
+            "num_buckets": 1,
         },
     )
+
+    # Make feet high-friction to discourage slipping and belly-sledding
+    physics_material_feet = EventTerm(
+        func=mdp.randomize_rigid_body_material,
+        mode="startup",
+        params={
+            "asset_cfg": SceneEntityCfg(
+                "robot",
+                body_names=["fl_tibia_link", "fr_tibia_link", "rl_tibia_link", "rr_tibia_link"],
+            ),
+            "static_friction_range": (1.6, 2.0),
+            "dynamic_friction_range": (1.2, 1.6),
+            "restitution_range": (0.0, 0.0),
+            "num_buckets": 1,
+        },
+    )
+
+    # Make base low-friction so sliding on the base is unattractive
+    physics_material_base = EventTerm(
+        func=mdp.randomize_rigid_body_material,
+        mode="startup",
+        params={
+            "asset_cfg": SceneEntityCfg("robot", body_names="base_link"),
+            "static_friction_range": (0.05, 0.10),
+            "dynamic_friction_range": (0.03, 0.08),
+            "restitution_range": (0.0, 0.0),
+            "num_buckets": 1,
+        },
+    )
+
+    # Optional: add base mass variation
     add_base_mass = EventTerm(
         func=mdp.randomize_rigid_body_mass,
         mode="startup",
@@ -46,27 +79,40 @@ class EventCfg:
 
 @configclass
 class SpiderbotEnvCfg(DirectRLEnvCfg):
-    # ======== Env timing / scaling ========
+    # ======== Env timing / spaces ========
     episode_length_s = 20.0
     decimation = 4
     action_scale = 1.0
     action_space = 12
+    state_space = 0
 
     # ======== Commands-only observation ========
-    # obs_dim = 3 * (cmd_history_len + 1) + (2 if use_phase else 0)
     cmd_history_len = 9
     use_phase = True
-    observation_space = 32  # = 3*(9+1) + 2
+    use_commands_only_obs = True
+    observation_space = 3 * (cmd_history_len + 1) + (2 if use_phase else 0)  # 32
 
-    # Optional: open-loop gait phase dynamics
+    # Phase dynamics
     phase_base_hz = 1.5
     phase_k_v = 1.0
 
-    # Termination threshold on base contact (N)
-    base_contact_terminate_force = 5.0
+    # ======== Omni-direction commands ========
+    cmd_vx_range = (-0.40, 0.60)   # m/s
+    cmd_vy_range = (-0.40, 0.40)   # m/s
+    cmd_yaw_range = (-1.00, 1.00)  # rad/s
+    cmd_hold_time_s = 1.0          # resample every second
 
-    # No separate state vector
-    state_space = 0
+    # ======== Robust termination thresholds ========
+    max_tilt_angle_deg = 45.0
+    min_base_height = 0.12
+    base_contact_force_thresh = 80.0     # N
+
+    # ======== Reward shaping (anti-belly-sledding) ========
+    base_contact_penalty_scale = -0.05   # multiplied by base contact force (N)
+    base_height_target = 0.22            # m
+    base_height_low_penalty_scale = -10.0
+    foot_contact_force_thresh = 5.0      # N for "in contact"
+    stance_contact_reward_scale = 1.0
 
     # ======== Simulation ========
     sim: SimulationCfg = SimulationCfg(
@@ -107,10 +153,9 @@ class SpiderbotEnvCfg(DirectRLEnvCfg):
     events: EventCfg = EventCfg()
 
     # ======== Robot ========
-    # Use the shared robot config and place it at each env prim
     robot: ArticulationCfg = SPIDERBOT_CFG.replace(prim_path="/World/envs/env_.*/Robot")
 
-    # ======== Rewards ========
+    # ======== Reward scales (existing terms) ========
     lin_vel_reward_scale = 5.0
     yaw_rate_reward_scale = 0.5
     z_vel_reward_scale = -2.0
@@ -118,5 +163,4 @@ class SpiderbotEnvCfg(DirectRLEnvCfg):
     joint_torque_reward_scale = -1e-5
     joint_accel_reward_scale = -1e-7
     action_rate_reward_scale = -0.01
-    flat_orientation_reward_scale = -5.0
-    max_tilt_angle_deg = 45.0
+    flat_orientation_reward_scale = -10.0  # stronger upright bias
