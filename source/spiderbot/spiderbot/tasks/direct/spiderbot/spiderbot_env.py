@@ -90,11 +90,7 @@ class SpiderbotEnv(DirectRLEnv):
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
         light_cfg.func("/World/Light", light_cfg)
 
-        # Resolve body indices for base and feet
-        self._base_id, _ = self._contact_sensor.find_bodies("base_link")
-        self._feet_ids, _ = self._contact_sensor.find_bodies(
-            ["fl_tibia_link", "fr_tibia_link", "rl_tibia_link", "rr_tibia_link"]
-        )
+        # (Defer body-id resolution to first reset when sensor buffers are ready)
 
     # ---------------------------------------------------------------------
     # Control and physics
@@ -117,9 +113,10 @@ class SpiderbotEnv(DirectRLEnv):
 
         # Mid-episode command resampling for omni-direction
         self._cmd_timer += self.step_dt
-        if self._cmd_timer[:, 0].max() >= float(self.cfg.cmd_hold_time_s):
-            mask = self._cmd_timer[:, 0] >= float(self.cfg.cmd_hold_time_s)
-            self._sample_commands(mask)
+        hold = float(self.cfg.cmd_hold_time_s)
+        mask = (self._cmd_timer[:, 0] >= hold)
+        if mask.any():
+            self._sample_commands(mask)   # <-- missing before (now implemented below)
             self._cmd_timer[mask, 0] = 0.0
 
     def _apply_action(self):
@@ -172,12 +169,21 @@ class SpiderbotEnv(DirectRLEnv):
         # Contact forces (current step = last in history)
         netF_hist = self._contact_sensor.data.net_forces_w_history  # [E, H, B, 3]
         F_now = netF_hist[:, -1, :, :]                               # [E, B, 3]
-        # Base contact magnitude
-        baseF = torch.norm(F_now[:, self._base_id, :], dim=-1).max(dim=1).values if self._base_id.numel() > 1 \
-                else torch.norm(F_now[:, self._base_id, :], dim=-1).squeeze(-1)
+
+        # Base contact magnitude (safe for 1 or many ids)
+        if self._base_id is not None and self._base_id.numel() > 0:
+            if self._base_id.numel() > 1:
+                baseF = torch.norm(F_now[:, self._base_id, :], dim=-1).max(dim=1).values
+            else:
+                baseF = torch.norm(F_now[:, self._base_id[0], :], dim=-1)
+        else:
+            baseF = torch.zeros(self.num_envs, device=self.device)
+
         # Feet contact magnitudes
-        feetF = torch.norm(F_now[:, self._feet_ids, :], dim=-1) if self._feet_ids.numel() > 0 \
-                else torch.zeros(self.num_envs, 0, device=self.device)
+        if self._feet_ids is not None and self._feet_ids.numel() > 0:
+            feetF = torch.norm(F_now[:, self._feet_ids, :], dim=-1)
+        else:
+            feetF = torch.zeros(self.num_envs, 0, device=self.device)
 
         # ====== Original tracking and regularization terms ======
         lin_vel_error = torch.sum(torch.square(self._commands[:, :2] - root_lin_b[:, :2]), dim=1)
@@ -191,15 +197,10 @@ class SpiderbotEnv(DirectRLEnv):
         action_rate = torch.sum(torch.square(self._actions - self._previous_actions), dim=1)
         flat_orientation = torch.sum(torch.square(g_b[:, :2]), dim=1)
 
-        # ====== New anti-belly-sledding terms ======
-        # 1) Penalize base contact
+        # ====== Anti-belly-sledding terms ======
         base_contact_pen = baseF * float(self.cfg.base_contact_penalty_scale)
-
-        # 2) Penalize low base height
         height_deficit = torch.clamp(self.cfg.base_height_target - base_height, min=0.0)
         low_height_pen = height_deficit * float(self.cfg.base_height_low_penalty_scale)
-
-        # 3) Encourage stance contacts (0..1 scale by fraction of feet in contact)
         if feetF.numel() > 0:
             feet_contact = (feetF > float(self.cfg.foot_contact_force_thresh)).float()
             stance_frac = torch.mean(feet_contact, dim=1)
@@ -242,9 +243,14 @@ class SpiderbotEnv(DirectRLEnv):
         # Base link contact force over threshold
         netF_hist = self._contact_sensor.data.net_forces_w_history
         F_now = netF_hist[:, -1, :, :]
-        baseF = torch.norm(F_now[:, self._base_id, :], dim=-1).max(dim=1).values if self._base_id.numel() > 1 \
-                else torch.norm(F_now[:, self._base_id, :], dim=-1).squeeze(-1)
-        base_contact = baseF > float(self.cfg.base_contact_force_thresh)
+        if self._base_id is not None and self._base_id.numel() > 0:
+            if self._base_id.numel() > 1:
+                baseF = torch.norm(F_now[:, self._base_id, :], dim=-1).max(dim=1).values
+            else:
+                baseF = torch.norm(F_now[:, self._base_id[0], :], dim=-1)
+            base_contact = baseF > float(self.cfg.base_contact_force_thresh)
+        else:
+            base_contact = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
 
         # Joint angle sanity (optional guard)
         joint_pos = self._robot.data.joint_pos
@@ -265,6 +271,15 @@ class SpiderbotEnv(DirectRLEnv):
     def _reset_idx(self, env_ids: torch.Tensor | None):
         if env_ids is None or len(env_ids) == self.num_envs:
             env_ids = self._robot._ALL_INDICES
+
+        # Initialize body IDs on first reset (sensor is now ready)
+        if self._base_id is None:
+            base_ids_list, _ = self._contact_sensor.find_bodies("base_link")
+            feet_ids_list, _ = self._contact_sensor.find_bodies(
+                ["fl_tibia_link", "fr_tibia_link", "rl_tibia_link", "rr_tibia_link"]
+            )
+            self._base_id = torch.tensor(base_ids_list, dtype=torch.long, device=self.device)
+            self._feet_ids = torch.tensor(feet_ids_list, dtype=torch.long, device=self.device)
 
         self._robot.reset(env_ids)
         super()._reset_idx(env_ids)
@@ -316,11 +331,15 @@ class SpiderbotEnv(DirectRLEnv):
         assert vx_vy_yaw.shape == self._commands.shape
         self._commands[:] = vx_vy_yaw.to(self._commands.device)
 
-    # Helper to sample omni-direction commands
+    # ---------------------------------------------------------------------
+    # Helpers
+    # ---------------------------------------------------------------------
     def _sample_commands(self, env_selector):
+        """Sample omni-directional commands into self._commands for selected envs.
+        env_selector: boolean mask (N_env,) or env_ids tensor.
+        """
         if isinstance(env_selector, torch.Tensor) and env_selector.dtype == torch.bool:
-            mask = env_selector
-            idx = torch.nonzero(mask, as_tuple=False).squeeze(-1)
+            idx = torch.nonzero(env_selector, as_tuple=False).squeeze(-1)
         else:
             idx = env_selector if isinstance(env_selector, torch.Tensor) else torch.as_tensor(env_selector, device=self.device)
 
@@ -330,8 +349,12 @@ class SpiderbotEnv(DirectRLEnv):
         vx_min, vx_max = self.cfg.cmd_vx_range
         vy_min, vy_max = self.cfg.cmd_vy_range
         wz_min, wz_max = self.cfg.cmd_yaw_range
+
         cmds = torch.zeros(idx.numel(), 3, device=self.device)
-        cmds[:, 0].uniform_(float(vx_min), float(vx_max))
-        cmds[:, 1].uniform_(float(vy_min), float(vy_max))
-        cmds[:, 2].uniform_(float(wz_min), float(wz_max))
+        # cmds[:, 0].uniform_(float(vx_min), float(vx_max))
+        # cmds[:, 1].uniform_(float(vy_min), float(vy_max))
+        # cmds[:, 2].uniform_(float(wz_min), float(wz_max))
+        cmds[:, 0].uniform_(0.0,0.0)
+        cmds[:, 1].uniform_(0.0,0.0)
+        cmds[:, 2].uniform_(0.0,0.0)
         self._commands[idx] = cmds

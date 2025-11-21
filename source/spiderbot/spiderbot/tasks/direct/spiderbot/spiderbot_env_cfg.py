@@ -1,4 +1,3 @@
-
 # spiderbot_env_cfg.py
 # Copyright (c) 2022-2025, The Isaac Lab Project Developers.
 # All rights reserved.
@@ -106,6 +105,7 @@ class SpiderbotEnvCfg(DirectRLEnvCfg):
     max_tilt_angle_deg = 45.0
     min_base_height = 0.12
     base_contact_force_thresh = 80.0     # N
+    joint_pos_limit_rad = 3.14           # ~180 degrees, sanity check
 
     # ======== Reward shaping (anti-belly-sledding) ========
     base_contact_penalty_scale = -0.05   # multiplied by base contact force (N)
