@@ -1,4 +1,4 @@
-"""Optimized configuration for Spider Bot with IK and asymmetric actor-critic."""
+"""Configuration for Model-Based Spider Bot with IK + RL residuals."""
 
 import math
 from isaaclab.envs import DirectRLEnvCfg
@@ -21,6 +21,7 @@ class EventCfg:
         func=mdp.randomize_rigid_body_material,
         mode="startup",
         params={
+            "asset_cfg": SceneEntityCfg("robot", body_names=".*"),
             "static_friction_range": (0.8, 1.2),
             "dynamic_friction_range": (0.6, 1.0),
             "restitution_range": (0.0, 0.0),
@@ -52,19 +53,23 @@ class EventCfg:
 
 @configclass
 class SpiderbotEnvCfg(DirectRLEnvCfg):
-    """Asymmetric actor-critic configuration."""
+    """Model-based configuration with fixed gait + RL residuals."""
     
     # Episode settings
     episode_length_s = 20.0
-    decimation = 4  # 50Hz control after decimation (200Hz sim / 4)
+    decimation = 4  # 50Hz control (200Hz sim / 4)
     
     # Command history length
     obs_cmd_hist_len = 10
     
     # Action and observation spaces
-    action_space = 17  # 1 freq + 12 amps + 4 phase offsets
-    observation_space = 30  # 3 * obs_cmd_hist_len (command history only - actor)
-    state_space = 0  # Critic uses same observations as actor (set to 0 for symmetric)
+    action_space = 12  # 12 joint angle residuals
+    observation_space = 30  # 3 * obs_cmd_hist_len (command history - actor)
+    state_space = 65  # Full state for critic: actor(30) + vel(3) + ang_vel(3) + gravity(3) + joint_pos(12) + joint_vel(12) + phase(2)
+    
+    # Gait parameters
+    base_gait_frequency = 1.5  # Fixed trot frequency (Hz)
+    max_residual_rad = 0.15  # Limit RL corrections to ±0.15 rad
     
     # Simulation settings
     sim: SimulationCfg = SimulationCfg(
@@ -111,17 +116,10 @@ class SpiderbotEnvCfg(DirectRLEnvCfg):
     # Robot configuration
     robot = SPIDERBOT_CFG.replace(prim_path="/World/envs/env_.*/Robot")
     
-    # CPG parameters (tuned for IK integration)
-    cpg_k_phase = 0.7  # Stronger phase coupling for diagonal pairs
-    cpg_k_amp = 0.5    # Moderate amplitude coupling
-    
-    # Phase action parameters
-    phase_range_rad = math.pi * 0.5  # Limit phase adjustments
-    phase_beta = 0.3  # Smoothing factor
-    
-    # Reward weights
+    # Reward weights (tuned for model-based approach)
     z_vel_reward_scale = -2.0
     ang_vel_reward_scale = -0.05
     joint_torque_reward_scale = -1e-5
     action_rate_reward_scale = -0.01
     flat_orientation_reward_scale = -5.0
+    residual_magnitude_scale = -0.05  # Encourage small corrections
