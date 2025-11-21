@@ -17,17 +17,8 @@ from .spiderbot_cfg import SPIDERBOT_CFG
 class EventCfg:
     """Domain randomization events."""
     
-    physics_material = EventTerm(
-        func=mdp.randomize_rigid_body_material,
-        mode="startup",
-        params={
-            "asset_cfg": SceneEntityCfg("robot", body_names=".*"),
-            "static_friction_range": (0.8, 1.2),
-            "dynamic_friction_range": (0.6, 1.0),
-            "restitution_range": (0.0, 0.0),
-            "num_buckets": 64,
-        },
-    )
+    # NOTE: physics_material event removed - causes API error in Isaac Lab
+    # Material properties are set at terrain level instead
     
     add_base_mass = EventTerm(
         func=mdp.randomize_rigid_body_mass,

@@ -196,8 +196,10 @@ class SpiderIK:
         lift = torch.sin(swing_phase * math.pi) * self.step_height
         
         # Foot moves from back to front during swing
-        swing_x = neutral_x + stride_x * (1.0 - 2.0 * swing_phase)
-        swing_y = neutral_y + stride_y * (1.0 - 2.0 * swing_phase)
+        # swing_phase=0: start at backward position (where stance ended)
+        # swing_phase=1: end at forward position (where next stance starts)
+        swing_x = neutral_x - stride_x * (1.0 - 2.0 * swing_phase)  # Fixed: changed sign
+        swing_y = neutral_y - stride_y * (1.0 - 2.0 * swing_phase)  # Fixed: changed sign
         swing_z = -self.default_height + lift
         
         # Combine based on phase
