@@ -1,6 +1,4 @@
-# Minimal omni-directional Spiderbot CPG-RL env.
-# Observations: command history only (vx, vy, yaw).
-# Actions: [frequency, 12 amplitudes], zero => standing.
+# Omni-directional Spiderbot CPG-RL env (command-only obs + freq floor + detailed logging).
 from __future__ import annotations
 
 import math
@@ -23,7 +21,6 @@ class SpiderbotEnv(DirectRLEnv):
         super().__init__(cfg, render_mode, **kwargs)
 
         # --- Actions (policy) -------------------------------------------------
-        # 1 freq + 12 amplitudes (robust CPG action space)
         self._actions = torch.zeros(self.num_envs, gym.spaces.flatdim(self.single_action_space), device=self.device)
         self._previous_actions = torch.zeros_like(self._actions)
 
@@ -35,7 +32,7 @@ class SpiderbotEnv(DirectRLEnv):
         self._zero_leg_offsets = torch.zeros(self.num_envs, 4, device=self.device)  # no per-leg phase actions
 
         # --- Commands (desired body-frame velocities) ------------------------
-        self._commands = torch.zeros(self.num_envs, 3, device=self.device)          # [vx, vy, yaw]
+        self._commands = torch.zeros(self.num_envs, 3, device=self.device)          # [vx, vy, yaw] (body frame)
         H = int(self.cfg.obs_cmd_hist_len)
         self._cmd_hist = torch.zeros(self.num_envs, H, 3, device=self.device)       # (N, H, 3)
         self._cmd_hist_len = H
@@ -59,6 +56,9 @@ class SpiderbotEnv(DirectRLEnv):
             k_amp=float(self.cfg.cpg_k_amp),
         )
 
+        # Logging
+        self._global_step = 0
+
     # --- Scene setup ---------------------------------------------------------
     def _setup_scene(self):
         self._robot = Articulation(self.cfg.robot)
@@ -79,42 +79,19 @@ class SpiderbotEnv(DirectRLEnv):
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
         light_cfg.func("/World/Light", light_cfg)
 
-        # Don't call find_bodies here - sensor not initialized yet
-
     # --- Command sampling / history -----------------------------------------
     def _resample_commands(self, env_ids: torch.Tensor):
-        """Piecewise-constant sampling of desired body-frame velocities."""
+        """Keep your remap 'as is' (you said it's correct)."""
         cmds = self._commands[env_ids]
-        # cmds[:, 0].uniform_(self.cfg.cmd_vx_min, self.cfg.cmd_vx_max)   # vx
-        # cmds[:, 1].uniform_(self.cfg.cmd_vy_min, self.cfg.cmd_vy_max)   # vy
-        # cmds[:, 2].uniform_(self.cfg.cmd_yaw_min, self.cfg.cmd_yaw_max) # yaw
+        # Example: constant forward intent in your space (vx_user, vy_user, yaw_user)
+        cmds[:, 0] = 0.3; cmds[:, 1] = 0.0; cmds[:, 2] = 0.0
 
-
-        self.curriculum_level = 0
-        if self.curriculum_level == 0:
-            cmds[:, 0] = 0.3; 
-            cmds[:, 1] = 0.0; 
-            cmds[:, 2] = 0.0
-        elif self.curriculum_level == 1:
-            cmds[:, 0].uniform_(0.0, 0.5); 
-            cmds[:, 1] = 0.0; 
-            cmds[:, 2] = 0.0
-        elif self.curriculum_level == 2:
-            cmds[:, 0].uniform_(0.1, 0.22); 
-            cmds[:, 1] = 0.0; 
-            cmds[:, 2].uniform_(-0.1, 0.1)
-        else:
-            cmds[:, 0].uniform_(0.0, 0.5); 
-            cmds[:, 1].uniform_(-0.1, 0.1); 
-            cmds[:, 2].uniform_(-0.3, 0.3)
-            
-    # user intent -> body frame (Isaac: +Y is left)
+        # Your body-frame remap (unchanged)
         cmds_b = torch.zeros_like(cmds)
-        cmds_b[:, 0] =  -cmds[:, 1]   # body X  <= forward
-        cmds_b[:, 1] = -cmds[:, 0]   # body Y  <= - right  (because +Y left in Isaac)
-        cmds_b[:, 2] =  cmds[:, 2]   # yaw (flip sign later if needed)
+        cmds_b[:, 0] = -cmds[:, 1]   # body X <= forward/right mapping you use
+        cmds_b[:, 1] = -cmds[:, 0]   # body Y <= -forward
+        cmds_b[:, 2] =  cmds[:, 2]
         self._commands[env_ids] = cmds_b
-
 
     def _update_command_history(self, env_ids: torch.Tensor):
         self._cmd_hist[env_ids] = torch.roll(self._cmd_hist[env_ids], shifts=-1, dims=1)
@@ -122,8 +99,8 @@ class SpiderbotEnv(DirectRLEnv):
 
     # --- RL loop -------------------------------------------------------------
     def _pre_physics_step(self, actions: torch.Tensor):
-        # Refresh commands piecewise-const
-        step_mod = (self.episode_length_buf % self._cmd_interval) == 0  # fixed
+        # Piecewise-constant command update
+        step_mod = (self.episode_length_buf % self._cmd_interval) == 0
         if torch.any(step_mod):
             self._resample_commands(torch.nonzero(step_mod, as_tuple=False).squeeze(-1))
         self._update_command_history(self._robot._ALL_INDICES)
@@ -132,52 +109,89 @@ class SpiderbotEnv(DirectRLEnv):
         self._previous_actions.copy_(self._actions)
         self._actions = actions.clone()
 
-        # Frequency in [f_min, f_max]
+        # Frequency in [f_min, f_max] from action
         freq_raw = actions[:, 0:1].clamp(-1.0, 1.0)
         new_freq = self.cfg.cpg_frequency_min + 0.5 * (freq_raw + 1.0) * (self.cfg.cpg_frequency_max - self.cfg.cpg_frequency_min)
 
-        # Amplitudes: robust mapping so zero -> standing (0 amplitude)
-        # Use ReLU on [-1,1] then scale to [0, amp_max].
-        amp_raw = actions[:, 1:13].clamp(-1.0, 1.0)
-        new_amp = torch.relu(amp_raw) * self.cfg.cpg_amplitude_max  # (N,12)
+        # --- Frequency floor tied to command magnitude -----------------------
+        if getattr(self.cfg, "freq_floor_enable", True):
+            v_des = self._commands[:, :2]
+            v_max = torch.tensor(
+                [max(abs(self.cfg.cmd_vx_min), self.cfg.cmd_vx_max),
+                 max(abs(self.cfg.cmd_vy_min), self.cfg.cmd_vy_max)],
+                device=self.device
+            )
+            speed = torch.linalg.norm(v_des / v_max, dim=1, keepdim=True).clamp(0.0, 1.0)  # 0..1
+            # 0 when command is exactly zero (no stepping), otherwise idle..run
+            floor = torch.where(
+                speed > 0.0,
+                self.cfg.freq_floor_idle + speed * (self.cfg.freq_floor_run - self.cfg.freq_floor_idle),
+                torch.zeros_like(speed)
+            )
+        else:
+            floor = torch.zeros_like(new_freq)
 
-        # Smooth parameters for stability
-        beta_f, beta_a = 0.2, 0.2
-        self._cpg_frequency = self._previous_frequency + beta_f * (new_freq - self._previous_frequency)
-        self._cpg_amplitudes = self._prev_amp + beta_a * (new_amp - self._prev_amp)
+        # Amplitudes: abs so random actions move; zero action => standing.
+        amp_raw = actions[:, 1:13].clamp(-1.0, 1.0)
+        new_amp = torch.abs(amp_raw) * self.cfg.cpg_amplitude_max
+
+        # Smooth parameters
+        beta_f, beta_a = 0.25, 0.25
+        freq_smoothed = self._previous_frequency + beta_f * (new_freq - self._previous_frequency)
+        amp_smoothed  = self._prev_amp + beta_a * (new_amp - self._prev_amp)
+
+        # Apply floor AFTER smoothing so the actually-used frequency is >= floor
+        self._cpg_frequency = torch.maximum(freq_smoothed, floor)
+        self._cpg_amplitudes = amp_smoothed
         self._previous_frequency.copy_(self._cpg_frequency)
         self._prev_amp.copy_(self._cpg_amplitudes)
+        # ---------------------------------------------------------------------
 
         # Run CPG (diagonal coupling handled inside SpiderCPG)
         joint_deltas = self._cpg.compute_joint_targets(
             frequency=self._cpg_frequency,
             amplitudes=self._cpg_amplitudes,
-            leg_phase_offsets=self._zero_leg_offsets,  # no leg-phase actions
+            leg_phase_offsets=self._zero_leg_offsets,
         )
 
         # Default pose + oscillator deltas. Zero action => default standing pose.
         self._processed_actions = joint_deltas + self._robot.data.default_joint_pos
+
+        # Logging helpers
+        self._last_freq_floor = floor
+        self._global_step += 1
 
     def _apply_action(self):
         self._robot.set_joint_position_target(self._processed_actions)
 
     # --- Observations (policy) -----------------------------------------------
     def _get_observations(self) -> dict:
-        # Only command history (vx, vy, yaw), flattened.
         obs = self._cmd_hist.reshape(self.num_envs, self._cmd_hist_len * 3)
         return {"policy": obs}
 
     # --- Rewards / penalties (simulation states only) ------------------------
     def _get_rewards(self) -> torch.Tensor:
-        # Track linear velocity in body frame (xy) to desired commands
-        lin_vel_error = torch.sum((self._commands[:, :2] - self._robot.data.root_lin_vel_b[:, :2]) ** 2, dim=1)
-        lin_vel_exp = torch.exp(-lin_vel_error / 0.25)
+        # Desired & actual body-frame velocities
+        v_des = self._commands[:, :2]
+        v_act = self._robot.data.root_lin_vel_b[:, :2]
+        w_des = self._commands[:, 2]
+        w_act = self._robot.data.root_ang_vel_b[:, 2]
 
-        # Track yaw-rate
-        yaw_err = (self._commands[:, 2] - self._robot.data.root_ang_vel_b[:, 2]) ** 2
-        yaw_exp = torch.exp(-yaw_err / 0.25)
+        eps = 1e-6
+        v_des_norm = torch.linalg.norm(v_des, dim=1).clamp(min=eps)
+        u_des = v_des / v_des_norm.unsqueeze(1)
 
-        # Soft penalties (stabilizers)
+        proj = torch.sum(v_act * u_des, dim=1)             # along desired direction
+        speed_err = (proj - v_des_norm) ** 2               # mismatch along desired
+        lateral = v_act - u_des * proj.unsqueeze(1)        # sideways drift
+        lat_pen = torch.sum(lateral ** 2, dim=1)
+        yaw_err = (w_act - w_des) ** 2
+
+        # Small bonus to "use" frequency when a command exists
+        speed_flag = (v_des_norm > 1e-4).float()
+        freq_bonus = getattr(self.cfg, "w_freq_bonus", 0.0) * (self._cpg_frequency.squeeze(1) * speed_flag)
+
+        # Stabilizers
         z_vel = (self._robot.data.root_lin_vel_b[:, 2]) ** 2
         ang_vel_xy = torch.sum(self._robot.data.root_ang_vel_b[:, :2] ** 2, dim=1)
         torques_l2 = torch.sum(self._robot.data.applied_torque ** 2, dim=1)
@@ -185,9 +199,13 @@ class SpiderbotEnv(DirectRLEnv):
         action_rate = torch.sum((self._actions - self._previous_actions) ** 2, dim=1)
         flat_orientation = torch.sum(self._robot.data.projected_gravity_b[:, :2] ** 2, dim=1)
 
+        # New reward
         r = (
-            self.cfg.lin_vel_reward_scale * lin_vel_exp
-            + self.cfg.yaw_rate_reward_scale * yaw_exp
+            self.cfg.w_align * proj
+            - self.cfg.w_speed_err * speed_err
+            - self.cfg.w_lat * lat_pen
+            - self.cfg.w_yaw_err * yaw_err
+            + freq_bonus
             + self.cfg.z_vel_reward_scale * z_vel
             + self.cfg.ang_vel_reward_scale * ang_vel_xy
             + self.cfg.joint_torque_reward_scale * torques_l2
@@ -195,26 +213,64 @@ class SpiderbotEnv(DirectRLEnv):
             + self.cfg.action_rate_reward_scale * action_rate
             + self.cfg.flat_orientation_reward_scale * flat_orientation
         ) * self.step_dt
+
+        # --- Logging to extras ----------------------------------------------
+        if getattr(self.cfg, "log_to_extras", True):
+            freq = self._cpg_frequency.squeeze(1)
+            floor = self._last_freq_floor.squeeze(1)
+            below = (freq + 1e-6 < floor).float()
+            self.extras["metrics/proj_along_cmd"] = proj.mean().item()
+            self.extras["metrics/speed_err"] = speed_err.mean().item()
+            self.extras["metrics/lat_vel"] = lat_pen.mean().item()
+            self.extras["metrics/yaw_err"] = yaw_err.mean().item()
+            self.extras["metrics/freq_mean"] = freq.mean().item()
+            self.extras["metrics/freq_floor_mean"] = floor.mean().item()
+            self.extras["metrics/freq_pct_below_floor"] = below.mean().item()
+            self.extras["metrics/amp_mean"] = self._cpg_amplitudes.abs().mean().item()
+            self.extras["metrics/cmd_speed"] = v_des_norm.mean().item()
+            self.extras["metrics/act_speed"] = torch.linalg.norm(v_act, dim=1).mean().item()
+            self.extras["reward/align"] = (self.cfg.w_align * proj * self.step_dt).mean().item()
+            self.extras["reward/speed_err"] = (-self.cfg.w_speed_err * speed_err * self.step_dt).mean().item()
+            self.extras["reward/lat"] = (-self.cfg.w_lat * lat_pen * self.step_dt).mean().item()
+            self.extras["reward/yaw_err"] = (-self.cfg.w_yaw_err * yaw_err * self.step_dt).mean().item()
+            self.extras["reward/freq_bonus"] = (freq_bonus * self.step_dt).mean().item()
+            self.extras["reward/stabilizers"] = (
+                (self.cfg.z_vel_reward_scale * z_vel
+                 + self.cfg.ang_vel_reward_scale * ang_vel_xy
+                 + self.cfg.joint_torque_reward_scale * torques_l2
+                 + self.cfg.joint_accel_reward_scale * accel_l2
+                 + self.cfg.action_rate_reward_scale * action_rate
+                 + self.cfg.flat_orientation_reward_scale * flat_orientation) * self.step_dt
+            ).mean().item()
+
+        # Optional periodic console logging
+        if (self._global_step % int(getattr(self.cfg, "log_every_steps", 100))) == 0:
+            mean_vals = (
+                proj.mean().item(), speed_err.mean().item(), lat_pen.mean().item(),
+                yaw_err.mean().item(), self._cpg_amplitudes.abs().mean().item(),
+                self._cpg_frequency.mean().item(), self._last_freq_floor.mean().item()
+            )
+            print(f"[Spiderbot] step={self._global_step} proj={mean_vals[0]:.3f} "
+                  f"speed_err={mean_vals[1]:.3f} lat={mean_vals[2]:.3f} yaw_err={mean_vals[3]:.3f} "
+                  f"amp_mean={mean_vals[4]:.3f} freq={mean_vals[5]:.3f} floor={mean_vals[6]:.3f}")
+
         return r
 
     # --- Terminations --------------------------------------------------------
     def _get_dones(self):
         time_out = self.episode_length_buf >= self.max_episode_length - 1
 
-        # Base height check
         try:
             base_z = self._robot.data.root_pos_w[:, 2]
         except AttributeError:
             base_z = self._robot.data.root_state_w[:, 2]
         too_low = base_z < self._min_base_z
 
-        # Tilt (use projected gravity)
         g_b = self._robot.data.projected_gravity_b
         g_norm = torch.linalg.norm(g_b, dim=1).clamp(min=1e-6)
         cos_tilt = torch.abs(g_b[:, 2]) / g_norm
         too_tilted = cos_tilt < self._max_tilt_cos
 
-        # Sustained base contact (from contact sensor history)
         net_forces = self._contact_sensor.data.net_forces_w_history  # [E,H,B,3]
         base_id = self._base_id if isinstance(self._base_id, int) else int(self._base_id[0])
         base_force_hist = torch.linalg.norm(net_forces[:, :, base_id], dim=-1)  # [E,H]
@@ -232,7 +288,6 @@ class SpiderbotEnv(DirectRLEnv):
         if env_ids is None or len(env_ids) == self.num_envs:
             env_ids = self._robot._ALL_INDICES
 
-        # Initialize base_id on first reset (sensor is now ready)
         if self._base_id is None:
             self._base_id, _ = self._contact_sensor.find_bodies("base_link")
 
@@ -251,11 +306,11 @@ class SpiderbotEnv(DirectRLEnv):
         self._actions[env_ids] = 0.0
         self._previous_actions[env_ids] = 0.0
 
-        # Sample new commands and seed history with same value
+        # Seed commands + history
         self._resample_commands(env_ids)
         self._cmd_hist[env_ids] = self._commands[env_ids].unsqueeze(1).repeat(1, self._cmd_hist_len, 1)
 
-        # Reset robot pose/vel at env origins
+        # Reset robot at env origins
         joint_pos = self._robot.data.default_joint_pos[env_ids]
         joint_vel = self._robot.data.default_joint_vel[env_ids]
         default_root_state = self._robot.data.default_root_state[env_ids]
@@ -264,5 +319,4 @@ class SpiderbotEnv(DirectRLEnv):
         self._robot.write_root_velocity_to_sim(default_root_state[:, 7:], env_ids)
         self._robot.write_joint_state_to_sim(joint_pos, joint_vel, None, env_ids)
 
-        # Align PD targets to actual pose at reset
         self._robot.set_joint_position_target(self._robot.data.joint_pos)
