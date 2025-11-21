@@ -85,10 +85,36 @@ class SpiderbotEnv(DirectRLEnv):
     def _resample_commands(self, env_ids: torch.Tensor):
         """Piecewise-constant sampling of desired body-frame velocities."""
         cmds = self._commands[env_ids]
-        cmds[:, 0].uniform_(self.cfg.cmd_vx_min, self.cfg.cmd_vx_max)   # vx
-        cmds[:, 1].uniform_(self.cfg.cmd_vy_min, self.cfg.cmd_vy_max)   # vy
-        cmds[:, 2].uniform_(self.cfg.cmd_yaw_min, self.cfg.cmd_yaw_max) # yaw
-        self._commands[env_ids] = cmds
+        # cmds[:, 0].uniform_(self.cfg.cmd_vx_min, self.cfg.cmd_vx_max)   # vx
+        # cmds[:, 1].uniform_(self.cfg.cmd_vy_min, self.cfg.cmd_vy_max)   # vy
+        # cmds[:, 2].uniform_(self.cfg.cmd_yaw_min, self.cfg.cmd_yaw_max) # yaw
+
+
+        self.curriculum_level = 0
+        if self.curriculum_level == 0:
+            cmds[:, 0] = 0.3; 
+            cmds[:, 1] = 0.0; 
+            cmds[:, 2] = 0.0
+        elif self.curriculum_level == 1:
+            cmds[:, 0].uniform_(0.0, 0.5); 
+            cmds[:, 1] = 0.0; 
+            cmds[:, 2] = 0.0
+        elif self.curriculum_level == 2:
+            cmds[:, 0].uniform_(0.1, 0.22); 
+            cmds[:, 1] = 0.0; 
+            cmds[:, 2].uniform_(-0.1, 0.1)
+        else:
+            cmds[:, 0].uniform_(0.0, 0.5); 
+            cmds[:, 1].uniform_(-0.1, 0.1); 
+            cmds[:, 2].uniform_(-0.3, 0.3)
+            
+    # user intent -> body frame (Isaac: +Y is left)
+        cmds_b = torch.zeros_like(cmds)
+        cmds_b[:, 0] =  -cmds[:, 1]   # body X  <= forward
+        cmds_b[:, 1] = -cmds[:, 0]   # body Y  <= - right  (because +Y left in Isaac)
+        cmds_b[:, 2] =  cmds[:, 2]   # yaw (flip sign later if needed)
+        self._commands[env_ids] = cmds_b
+
 
     def _update_command_history(self, env_ids: torch.Tensor):
         self._cmd_hist[env_ids] = torch.roll(self._cmd_hist[env_ids], shifts=-1, dims=1)
