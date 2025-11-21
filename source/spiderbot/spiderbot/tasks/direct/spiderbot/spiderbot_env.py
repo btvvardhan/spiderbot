@@ -54,7 +54,7 @@ class SpiderbotEnv(DirectRLEnv):
         }
 
     def _setup_scene(self):
-        self._robot = Articulation(self.cfg.robot_cfg)
+        self._robot = Articulation(self.cfg.robot)
         self.scene.articulations["robot"] = self._robot
         self._contact_sensor = ContactSensor(self.cfg.contact_sensor)
         self.scene.sensors["contact_sensor"] = self._contact_sensor
