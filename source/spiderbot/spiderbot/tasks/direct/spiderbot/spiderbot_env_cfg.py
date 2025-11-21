@@ -1,5 +1,5 @@
 """Environment configuration for Spider Bot CPG-RL training (omni-directional, command-only obs)."""
-
+import math
 import isaaclab.envs.mdp as mdp
 import isaaclab.sim as sim_utils
 from isaaclab.envs import DirectRLEnvCfg
@@ -10,9 +10,7 @@ from isaaclab.sim import SimulationCfg
 from isaaclab.terrains import TerrainImporterCfg
 from isaaclab.utils import configclass
 from isaaclab.sensors import ContactSensorCfg
-
 from .spiderbot_cfg import SPIDERBOT_CFG
-
 
 @configclass
 class EventCfg:
@@ -37,29 +35,27 @@ class EventCfg:
         },
     )
 
-
 @configclass
 class SpiderbotEnvCfg(DirectRLEnvCfg):
     # Timing
     episode_length_s = 20.0
     decimation = 4
 
-    # Spaces (command-only observation)
-    action_space = 13                         # 1 frequency + 12 amplitudes
+    # === Spaces (must be present for Hydra serialization) ===
+    # 1 frequency + 12 joint amplitudes + 4 per-leg phase offsets
+    action_space = 17
+    # Observation = stacked command history only: (vx, vy, yaw) * H
     obs_cmd_hist_len = 10
-    observation_space = 3 * obs_cmd_hist_len  # (vx, vy, yaw) * H
-
+    observation_space = 3 * obs_cmd_hist_len
     state_space = 0
     action_scale = 1.0
 
     # Simulation
     sim: SimulationCfg = SimulationCfg(
-        dt=1 / 200,
+        dt=1.0 / 200.0,
         render_interval=decimation,
         physics_material=sim_utils.RigidBodyMaterialCfg(
-            friction_combine_mode="multiply",
-            restitution_combine_mode="multiply",
-            static_friction=1.2,
+            static_friction=1.0,
             dynamic_friction=1.0,
             restitution=0.0,
         ),
@@ -69,18 +65,16 @@ class SpiderbotEnvCfg(DirectRLEnvCfg):
     terrain = TerrainImporterCfg(
         prim_path="/World/ground",
         terrain_type="plane",
-        collision_group=0,
+        collision_group=-1,
         physics_material=sim_utils.RigidBodyMaterialCfg(
-            friction_combine_mode="multiply",
-            restitution_combine_mode="multiply",
-            static_friction=1.2,
+            static_friction=1.0,
             dynamic_friction=1.0,
             restitution=0.0,
         ),
         debug_vis=False,
     )
 
-    # Contact sensor (for terminations only; not observed)
+    # Contact sensor (term only; not observed)
     contact_sensor: ContactSensorCfg = ContactSensorCfg(
         prim_path="/World/envs/env_.*/Robot/.*",
         history_length=5,
@@ -88,44 +82,46 @@ class SpiderbotEnvCfg(DirectRLEnvCfg):
         track_air_time=True,
     )
 
-    # Scene
+    # Scene (keeping your larger batch; adjust if needed)
     scene: InteractiveSceneCfg = InteractiveSceneCfg(
-        num_envs=200,
-        env_spacing=2.0,
+        num_envs=4096,
+        env_spacing=2.5,
         replicate_physics=True,
     )
 
     # DR
     events: EventCfg = EventCfg()
 
-    # Robot and CPG
+    # Robot + CPG
     robot = SPIDERBOT_CFG.replace(prim_path="/World/envs/env_.*/Robot")
     cpg_frequency_min = 0.0
     cpg_frequency_max = 3.0
     cpg_amplitude_min = 0.0
     cpg_amplitude_max = 0.8
     cpg_k_phase = 0.5
-    cpg_k_amp = 0.5
+    cpg_k_amp   = 0.5
 
-    # Commands (ranges for sampler or your own remap)
+    # Commands
     cmd_vx_min = -0.40; cmd_vx_max =  0.40
     cmd_vy_min = -0.40; cmd_vy_max =  0.40
     cmd_yaw_min = -0.60; cmd_yaw_max = 0.60
     command_change_interval_s = 2.0
 
-    # >>> Frequency floor (prevents the CPG from stalling when |v*|>0)
+    # Frequency floor (keeps oscillator alive when |cmd| > 0)
     freq_floor_enable = True
-    freq_floor_idle = 0.6   # Hz when command is tiny but non-zero
-    freq_floor_run  = 1.8   # Hz at full command (|v*| == max)
-    w_freq_bonus = 0.2      # small positive reward to use frequency when |v*|>0
+    freq_floor_idle = 0.6
+    freq_floor_run  = 1.8
+    w_freq_bonus = 0.2
 
-    # Reward weights (projection tracker)
+    # Phase action mapping / smoothing
+    phase_range_rad = math.pi        # raw ∈ [-1,1] → Δφ ∈ [-π, +π]
+    phase_beta = 0.25                # EMA smoothing for phase actions
+
+    # Reward weights (projection-based tracker) + stabilizers
     w_align = 6.0
     w_speed_err = 4.0
     w_lat = 2.0
     w_yaw_err = 2.0
-
-    # Stabilizers
     z_vel_reward_scale = -2.0
     ang_vel_reward_scale = -0.05
     joint_torque_reward_scale = -1e-5
@@ -133,6 +129,6 @@ class SpiderbotEnvCfg(DirectRLEnvCfg):
     action_rate_reward_scale = -0.01
     flat_orientation_reward_scale = -5.0
 
-    # Logging controls
+    # Logging
     log_every_steps = 100
     log_to_extras = True
