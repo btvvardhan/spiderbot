@@ -16,7 +16,7 @@ SPIDERBOT_CFG = ArticulationCfg(
         
         # Articulation properties
         articulation_props=sim_utils.ArticulationRootPropertiesCfg(
-            enabled_self_collisions=False,  # ✅ Prevent leg interference
+            enabled_self_collisions=False,
             solver_position_iteration_count=8,
             solver_velocity_iteration_count=4,
         ),
@@ -38,10 +38,8 @@ SPIDERBOT_CFG = ArticulationCfg(
     
     # Initial state
     init_state=ArticulationCfg.InitialStateCfg(
-        pos=(0.0, 0.0, 0.35),  # ✅ Lower spawn height (was 0.15)
+        pos=(0.0, 0.0, 0.35),
         rot=(1.0, 0.0, 0.0, 0.0),
-        
-        # Joint positions - neutral stance
         joint_pos={
             "fl_coxa_joint":  0.0,   "fl_femur_joint":  0.0,   "fl_tibia_joint":  0.0,
             "fr_coxa_joint":  0.0,   "fr_femur_joint":  0.0,   "fr_tibia_joint":  0.0,
@@ -60,14 +58,10 @@ SPIDERBOT_CFG = ArticulationCfg(
                 "rl_coxa_joint",  "rl_femur_joint",  "rl_tibia_joint",
                 "rr_coxa_joint",  "rr_femur_joint",  "rr_tibia_joint",
             ],
-            
-            # ✅ CRITICAL: Correct PD gains (not 100/4!)
-            stiffness=200.0,      # High stiffness for position tracking
-            damping=10.0,          # Appropriate damping for smooth motion
-            
-            # Effort and velocity limits
-            effort_limit_sim=100.0,    # Max torque per joint (Nm)
-            velocity_limit_sim=5.0,   # Max angular velocity (rad/s)
+            stiffness=10000.0,
+            damping=100.0,
+            effort_limit_sim=100.0,
+            velocity_limit_sim=5.0,
         ),
     },
 )

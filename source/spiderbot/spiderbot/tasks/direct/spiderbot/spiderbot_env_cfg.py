@@ -1,4 +1,4 @@
-# spiderbot3_env_cfg.py
+# spiderbot_env_cfg.py
 # Copyright (c) 2022-2025, The Isaac Lab Project Developers.
 # All rights reserved.
 #
@@ -15,7 +15,6 @@ from isaaclab.sim import SimulationCfg
 from isaaclab.terrains import TerrainImporterCfg
 from isaaclab.utils import configclass
 from isaaclab.sensors import ContactSensorCfg
-from isaaclab.actuators import ImplicitActuatorCfg
 from .spiderbot_cfg import SPIDERBOT_CFG
 
 
@@ -47,17 +46,29 @@ class EventCfg:
 
 @configclass
 class SpiderbotEnvCfg(DirectRLEnvCfg):
-    # env
+    # ======== Env timing / scaling ========
     episode_length_s = 20.0
     decimation = 4
-    action_scale = 1
+    action_scale = 1.0
     action_space = 12
-    observation_space = 48
+
+    # ======== Commands-only observation ========
+    # obs_dim = 3 * (cmd_history_len + 1) + (2 if use_phase else 0)
+    cmd_history_len = 9
+    use_phase = True
+    observation_space = 32  # = 3*(9+1) + 2
+
+    # Optional: open-loop gait phase dynamics
+    phase_base_hz = 1.5
+    phase_k_v = 1.0
+
+    # Termination threshold on base contact (N)
+    base_contact_terminate_force = 5.0
+
+    # No separate state vector
     state_space = 0
 
-
-
-    # simulation
+    # ======== Simulation ========
     sim: SimulationCfg = SimulationCfg(
         dt=1 / 200,
         render_interval=decimation,
@@ -83,33 +94,29 @@ class SpiderbotEnvCfg(DirectRLEnvCfg):
         debug_vis=False,
     )
 
+    # Contact sensor on the articulated robot under /World/envs/.../Robot
     contact_sensor: ContactSensorCfg = ContactSensorCfg(
-        prim_path="/World/envs/env_.*/Robot/.*",  # Path to base_link in cloned envs
+        prim_path="/World/envs/env_.*/Robot/.*",
         history_length=5,
         update_period=0.005,  # Matches sim dt = 1/200
-        track_air_time=True,  # Not needed for base
+        track_air_time=True,
     )
 
-    # scene
+    # ======== Scene / events ========
     scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=200, env_spacing=2.0, replicate_physics=True)
-
-    # events
     events: EventCfg = EventCfg()
-        # --- robot cfg ---
-    robot = SPIDERBOT_CFG.replace(prim_path="/World/envs/env_.*/Robot")
 
-    # reward scales
-    lin_vel_reward_scale = 5.0  # Increased for more movement reward
+    # ======== Robot ========
+    # Use the shared robot config and place it at each env prim
+    robot: ArticulationCfg = SPIDERBOT_CFG.replace(prim_path="/World/envs/env_.*/Robot")
+
+    # ======== Rewards ========
+    lin_vel_reward_scale = 5.0
     yaw_rate_reward_scale = 0.5
     z_vel_reward_scale = -2.0
     ang_vel_reward_scale = -0.05
-    joint_torque_reward_scale = -1e-5  # Reduced punishment
-    joint_accel_reward_scale = -1e-7  # Reduced punishment
+    joint_torque_reward_scale = -1e-5
+    joint_accel_reward_scale = -1e-7
     action_rate_reward_scale = -0.01
     flat_orientation_reward_scale = -5.0
     max_tilt_angle_deg = 45.0
-
-
-
-
-######################################
