@@ -66,10 +66,10 @@ class SpiderCPG:
 
         # Joint-type scaling [coxa, femur, tibia] × 4 legs
         self.joint_type_scales = torch.tensor([
-            1.0, 0.3, 0.2,
-            1.0, 0.3, 0.2,
-            1.0, 0.3, 0.2,
-            1.0, 0.3, 0.2,
+            0.8, 0.3, 0.15,
+            0.8, 0.3, 0.15,
+            0.8, 0.3, 0.15,
+            0.8, 0.3, 0.15,
         ], device=device).unsqueeze(0)  # (1,12)
 
     def reset(self, env_ids: torch.Tensor):

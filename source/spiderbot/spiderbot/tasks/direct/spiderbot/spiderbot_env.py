@@ -1,4 +1,6 @@
-# Omni-directional Spiderbot CPG-RL env (command-only obs + freq floor + phases + logging).
+# Omni-directional Spiderbot CPG-RL env with asymmetric critic:
+# - Actor obs: command history only (unchanged)
+# - Critic obs: privileged state (root kinematics, joints, CPG internals, etc.)
 from __future__ import annotations
 
 import math
@@ -30,7 +32,7 @@ class SpiderbotEnv(DirectRLEnv):
         self._previous_frequency = torch.zeros_like(self._cpg_frequency)
         self._prev_amp = torch.zeros_like(self._cpg_amplitudes)
 
-        # NEW: per-leg phase offsets (Δφ for [FL, FR, RL, RR])
+        # Per-leg phase offsets (Δφ for [FL, FR, RL, RR])
         self._leg_phase_offsets = torch.zeros(self.num_envs, 4, device=self.device)
         self._prev_phase = torch.zeros_like(self._leg_phase_offsets)
 
@@ -67,12 +69,15 @@ class SpiderbotEnv(DirectRLEnv):
         self.scene.articulations["robot"] = self._robot
         self._contact_sensor = ContactSensor(self.cfg.contact_sensor)
         self.scene.sensors["contact_sensor"] = self._contact_sensor
+
         self.cfg.terrain.num_envs = self.scene.cfg.num_envs
         self.cfg.terrain.env_spacing = self.scene.cfg.env_spacing
         self._terrain = self.cfg.terrain.class_type(self.cfg.terrain)
+
         self.scene.clone_environments(copy_from_source=False)
         if self.device == "cpu":
             self.scene.filter_collisions(global_prim_paths=[self.cfg.terrain.prim_path])
+
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
         light_cfg.func("/World/Light", light_cfg)
 
@@ -166,11 +171,53 @@ class SpiderbotEnv(DirectRLEnv):
     def _apply_action(self):
         self._robot.set_joint_position_target(self._processed_actions)
 
+    # ---------------- Asymmetric Actor–Critic I/O ----------------------------
     def _get_observations(self) -> dict:
-        obs = self._cmd_hist.reshape(self.num_envs, self._cmd_hist_len * 3)
-        return {"policy": obs}
+        """Actor obs stays command-history only; optionally also return critic obs."""
+        obs_actor = self._cmd_hist.reshape(self.num_envs, self._cmd_hist_len * 3)
+        if getattr(self.cfg, "return_critic_in_obs", True):
+            obs_critic = self._build_critic_obs()
+            return {"policy": obs_actor, "critic": obs_critic}
+        else:
+            return {"policy": obs_actor}
 
-    # Rewards / penalties (unchanged projection tracker + stabilizers) --------
+    def _build_critic_obs(self) -> torch.Tensor:
+        """Privileged critic vector; shape must match cfg.state_space."""
+        N = self.num_envs
+        parts = [
+            # (1) same command history the actor sees: (3 * H)
+            self._cmd_hist.reshape(N, self._cmd_hist_len * 3),
+            # (2) body-frame kinematics & gravity (6 + 3)
+            self._robot.data.root_lin_vel_b,      # (N,3)
+            self._robot.data.root_ang_vel_b,      # (N,3)
+            self._robot.data.projected_gravity_b, # (N,3)
+            # (3) joint state (12 + 12)
+            self._robot.data.joint_pos,           # (N,12)
+            self._robot.data.joint_vel,           # (N,12)
+            # (4) CPG internals (1 + 12 + 4 + 1)
+            self._cpg_frequency,                  # (N,1)
+            self._cpg_amplitudes,                 # (N,12)
+            self._leg_phase_offsets,              # (N,4)
+            self._cpg.cpg.phase_angle(),          # (N,1)
+            # (5) previous raw action (17)
+            self._previous_actions,               # (N,17)
+            # (6) base height (N,1)
+            (self._robot.data.root_pos_w[:, 2:3]
+             if hasattr(self._robot.data, "root_pos_w")
+             else self._robot.data.root_state_w[:, 2:3]),
+        ]
+        critic = torch.cat(parts, dim=1)
+        if getattr(self.cfg, "clip_critic_obs", True):
+            critic = torch.clamp(critic, -10.0, 10.0)
+        return critic
+
+    # Some libraries (e.g., RSL-RL) consume privileged input via get_states().
+    def _get_states(self) -> torch.Tensor:
+        if getattr(self.cfg, "use_asymmetric_critic", True):
+            return self._build_critic_obs()
+        return torch.zeros((self.num_envs, 0), device=self.device, dtype=torch.float32)
+
+    # ---------------- Rewards / penalties (unchanged core) -------------------
     def _get_rewards(self) -> torch.Tensor:
         v_des = self._commands[:, :2]
         v_act = self._robot.data.root_lin_vel_b[:, :2]
@@ -233,7 +280,7 @@ class SpiderbotEnv(DirectRLEnv):
 
         return r
 
-    # Terminations / Reset unchanged -----------------------------------------
+    # ---------------- Terminations / Reset (unchanged) -----------------------
     def _get_dones(self):
         time_out = self.episode_length_buf >= self.max_episode_length - 1
         try:
@@ -241,10 +288,12 @@ class SpiderbotEnv(DirectRLEnv):
         except AttributeError:
             base_z = self._robot.data.root_state_w[:, 2]
         too_low = base_z < self._min_base_z
+
         g_b = self._robot.data.projected_gravity_b
         g_norm = torch.linalg.norm(g_b, dim=1).clamp(min=1e-6)
         cos_tilt = torch.abs(g_b[:, 2]) / g_norm
         too_tilted = cos_tilt < self._max_tilt_cos
+
         net_forces = self._contact_sensor.data.net_forces_w_history
         base_id = self._base_id if isinstance(self._base_id, int) else int(self._base_id[0])
         base_force_hist = torch.linalg.norm(net_forces[:, :, base_id], dim=-1)
@@ -252,6 +301,7 @@ class SpiderbotEnv(DirectRLEnv):
         touching = base_force_max > self._min_contact_force
         self._contact_hits = torch.where(touching, self._contact_hits + 1, torch.zeros_like(self._contact_hits))
         sustained_touch = self._contact_hits >= self._contact_frames_needed
+
         bad_state = ~torch.isfinite(self._robot.data.joint_pos).all(dim=1)
         died = too_low | too_tilted | sustained_touch | bad_state
         return died, time_out
@@ -261,6 +311,7 @@ class SpiderbotEnv(DirectRLEnv):
             env_ids = self._robot._ALL_INDICES
         if self._base_id is None:
             self._base_id, _ = self._contact_sensor.find_bodies("base_link")
+
         self._robot.reset(env_ids)
         super()._reset_idx(env_ids)
 

@@ -1,4 +1,4 @@
-"""Environment configuration for Spider Bot CPG-RL training (omni-directional, command-only obs)."""
+"""Environment configuration for Spider Bot CPG-RL training (omni-directional, command-only obs) with asymmetric critic."""
 import math
 import isaaclab.envs.mdp as mdp
 import isaaclab.sim as sim_utils
@@ -11,6 +11,7 @@ from isaaclab.terrains import TerrainImporterCfg
 from isaaclab.utils import configclass
 from isaaclab.sensors import ContactSensorCfg
 from .spiderbot_cfg import SPIDERBOT_CFG
+
 
 @configclass
 class EventCfg:
@@ -35,20 +36,32 @@ class EventCfg:
         },
     )
 
+
 @configclass
 class SpiderbotEnvCfg(DirectRLEnvCfg):
     # Timing
     episode_length_s = 20.0
     decimation = 4
 
-    # === Spaces (must be present for Hydra serialization) ===
+    # === Spaces (actor obs unchanged) =======================================
     # 1 frequency + 12 joint amplitudes + 4 per-leg phase offsets
     action_space = 17
-    # Observation = stacked command history only: (vx, vy, yaw) * H
+
+    # Actor observation = stacked command history only: (vx, vy, yaw) * H
     obs_cmd_hist_len = 10
-    observation_space = 3 * obs_cmd_hist_len
-    state_space = 0
+    observation_space = 3 * obs_cmd_hist_len  # -> 30 when H=10
     action_scale = 1.0
+
+    # === Asymmetric actor–critic ============================================
+    # Keep actor sparse; give critic privileged state for faster learning.
+    use_asymmetric_critic = True
+    # Critic vector = actor_cmd_hist (3*H) + extras (69) = 99 when H=10.
+    critic_extra_dim = 69
+    state_space = observation_space + critic_extra_dim
+    # Some RL stacks expect privileged input via observations as Dict["critic"].
+    return_critic_in_obs = True
+    # Light clipping to keep critic features well-behaved early on.
+    clip_critic_obs = True
 
     # Simulation
     sim: SimulationCfg = SimulationCfg(
@@ -82,7 +95,7 @@ class SpiderbotEnvCfg(DirectRLEnvCfg):
         track_air_time=True,
     )
 
-    # Scene (keeping your larger batch; adjust if needed)
+    # Scene
     scene: InteractiveSceneCfg = InteractiveSceneCfg(
         num_envs=4096,
         env_spacing=2.5,
@@ -120,8 +133,8 @@ class SpiderbotEnvCfg(DirectRLEnvCfg):
     # Reward weights (projection-based tracker) + stabilizers
     w_align = 6.0
     w_speed_err = 4.0
-    w_lat = 2.0
-    w_yaw_err = 2.0
+    w_lat = 4.0
+    w_yaw_err = 4.0
     z_vel_reward_scale = -2.0
     ang_vel_reward_scale = -0.05
     joint_torque_reward_scale = -1e-5
