@@ -62,8 +62,8 @@ SPIDERBOT_CFG = ArticulationCfg(
             ],
             
             # ✅ CRITICAL: Correct PD gains (not 100/4!)
-            stiffness=10000.0,      # High stiffness for position tracking
-            damping=100.0,          # Appropriate damping for smooth motion
+            stiffness=200.0,      # High stiffness for position tracking
+            damping=10.0,          # Appropriate damping for smooth motion
             
             # Effort and velocity limits
             effort_limit_sim=100.0,    # Max torque per joint (Nm)

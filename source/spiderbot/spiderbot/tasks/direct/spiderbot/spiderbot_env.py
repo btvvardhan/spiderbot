@@ -35,7 +35,7 @@ class SpiderbotEnv(DirectRLEnv):
 
         # Get specific body indices
         self._base_id, _ = self._contact_sensor.find_bodies("base_link")
-        self._die_body_ids, _ = self._contact_sensor.find_bodies(["arm_a_1_1", "arm_a_2_1", "arm_a_3_1", "arm_a_4_1"])
+        self._die_body_ids, _ = self._contact_sensor.find_bodies(["fl_tibia_link", "fr_tibia_link", "rl_tibia_link", "rr_tibia_link"])
 
 
         # Logging

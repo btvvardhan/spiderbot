@@ -84,7 +84,7 @@ class SpiderbotEnvCfg(DirectRLEnvCfg):
     )
 
     contact_sensor: ContactSensorCfg = ContactSensorCfg(
-        prim_path="/World/envs/env_.*/Spider/.*",  # Path to base_link in cloned envs
+        prim_path="/World/envs/env_.*/Robot/.*",  # Path to base_link in cloned envs
         history_length=5,
         update_period=0.005,  # Matches sim dt = 1/200
         track_air_time=True,  # Not needed for base
@@ -112,3 +112,4 @@ class SpiderbotEnvCfg(DirectRLEnvCfg):
 
 
 
+######################################
