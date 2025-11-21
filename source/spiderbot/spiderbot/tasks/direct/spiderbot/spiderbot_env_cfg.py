@@ -95,52 +95,8 @@ class SpiderbotEnvCfg(DirectRLEnvCfg):
 
     # events
     events: EventCfg = EventCfg()
-
-    # robot
-
-
         # --- robot cfg ---
-    robot_cfg: ArticulationCfg = ArticulationCfg(
-        prim_path="/World/envs/env_.*/Spider",
-        spawn=sim_utils.UsdFileCfg(
-            usd_path="/home/teja/spiderbot/assets/spiderbot/spiderbot.usd",
-            articulation_props=sim_utils.ArticulationRootPropertiesCfg(
-                enabled_self_collisions=True, solver_position_iteration_count=8
-            ),
-            rigid_props=sim_utils.RigidBodyPropertiesCfg(
-                disable_gravity=False, max_depenetration_velocity=5.0
-            ),
-            activate_contact_sensors=True,
-        ),
-
-        # ✅ actuate exactly your 12 leg DOFs
-        actuators={
-            "legs": ImplicitActuatorCfg(
-                joint_names_expr=[
-                    r"Revolute_110", r"Revolute_113", r"Revolute_116", r"Revolute_119",
-                    r"Revolute_111", r"Revolute_114", r"Revolute_117", r"Revolute_120",
-                    r"Revolute_112", r"Revolute_115", r"Revolute_118", r"Revolute_121",
-                ],
-                # start conservative so it doesn’t flop on step 1
-                stiffness=100.0,
-                damping=15.0,
-                effort_limit_sim=40.0,
-                velocity_limit_sim=8.0,
-            )
-        },
-
-        # ✅ safe spawn pose
-        init_state=ArticulationCfg.InitialStateCfg(
-            pos=(0.0, 0.0, 0.22),   # a bit above ground
-            rot=(1.0, 0.0, 0.0, 0.0),
-            joint_pos={".*": 0.0},
-            joint_vel={".*": 0.0},
-        ),
-    )
-
-
-
-
+    robot = SPIDERBOT_CFG.replace(prim_path="/World/envs/env_.*/Robot")
 
     # reward scales
     lin_vel_reward_scale = 5.0  # Increased for more movement reward
