@@ -39,7 +39,8 @@ SPIDERBOT_CFG = ArticulationCfg(
     # Initial state
     init_state=ArticulationCfg.InitialStateCfg(
         pos=(0.0, 0.0, 0.35),  # ✅ Lower spawn height (was 0.15)
-        rot=(1.0, 0.0, 0.0, 0.0),
+        rot=(0.7071, 0.0, 0.0, 0.7071),  # 90 deg about z-axis
+        
         
         # Joint positions - neutral stance
         joint_pos={

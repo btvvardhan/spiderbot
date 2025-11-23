@@ -19,7 +19,6 @@ from .spiderbot_env_cfg import SpiderbotEnvCfg
 from .cpg import SpiderCPG
 
 
-
 class SpiderbotEnv(DirectRLEnv):
     cfg: SpiderbotEnvCfg
 
@@ -35,13 +34,19 @@ class SpiderbotEnv(DirectRLEnv):
         self._cpg_amplitudes = torch.zeros(self.num_envs, 12, device=self.device)
         self._cpg_phases = torch.zeros(self.num_envs, 4, device=self.device)
         self._previous_frequency = torch.zeros_like(self._cpg_frequency)
-        self._prev_amp   = torch.zeros(self.num_envs, 12, device=self.device)
-        self._prev_phase = torch.zeros(self.num_envs, 4,  device=self.device)
+        self._prev_amp = torch.zeros(self.num_envs, 12, device=self.device)
+        self._prev_phase = torch.zeros(self.num_envs, 4, device=self.device)
+        
         # X/Y linear velocity and yaw angular velocity commands
         self._commands = torch.zeros(self.num_envs, 3, device=self.device)
+        
+        # === NEW: Command history for sensor-less actor ===
+        self._cmd_history_len = int(getattr(self.cfg, "cmd_history_len", 5))
+        self._cmd_hist = torch.zeros(self.num_envs, self._cmd_history_len, 3, device=self.device)
 
         # Get specific body indices
         self._base_id, _ = self._contact_sensor.find_bodies("base_link")
+        
         # Termination thresholds & counters
         self._min_base_z = 0.06
         self._max_tilt_deg = 65.0
@@ -49,11 +54,12 @@ class SpiderbotEnv(DirectRLEnv):
         self._min_contact_force = 30.0
         self._contact_frames_needed = 3
         self._contact_hits = torch.zeros(self.num_envs, dtype=torch.int32, device=self.device)
+        
         self._cpg = SpiderCPG(
-                    num_envs=self.num_envs,
-                    dt=self.step_dt,
-                    device=self.device
-                )
+            num_envs=self.num_envs,
+            dt=self.step_dt,
+            device=self.device
+        )
 
         # Logging
         self._episode_sums = {
@@ -89,7 +95,6 @@ class SpiderbotEnv(DirectRLEnv):
 
     def _pre_physics_step(self, actions: torch.Tensor):
         self._previous_actions = self._actions.clone()
-
         self._actions = actions.clone()
         
         freq_raw = actions[:, 0:1]
@@ -109,20 +114,20 @@ class SpiderbotEnv(DirectRLEnv):
             self.cfg.cpg_phase_min +
             (phase_raw + 1.0) * 0.5 * (self.cfg.cpg_phase_max - self.cfg.cpg_phase_min)
         )
+        
         beta_f, beta_a, beta_p = 0.2, 0.2, 0.2
 
-        new_freq  = self._cpg_frequency
-        new_amp   = self._cpg_amplitudes
+        new_freq = self._cpg_frequency
+        new_amp = self._cpg_amplitudes
         new_phase = self._cpg_phases
 
-        self._cpg_frequency = self._previous_frequency + beta_f * (new_freq  - self._previous_frequency)
-        self._cpg_amplitudes = self._prev_amp          + beta_a * (new_amp   - self._prev_amp)
-        self._cpg_phases     = self._prev_phase        + beta_p * (new_phase - self._prev_phase)
+        self._cpg_frequency = self._previous_frequency + beta_f * (new_freq - self._previous_frequency)
+        self._cpg_amplitudes = self._prev_amp + beta_a * (new_amp - self._prev_amp)
+        self._cpg_phases = self._prev_phase + beta_p * (new_phase - self._prev_phase)
 
         self._previous_frequency = self._cpg_frequency.clone()
-        self._prev_amp   = self._cpg_amplitudes.clone()
+        self._prev_amp = self._cpg_amplitudes.clone()
         self._prev_phase = self._cpg_phases.clone()
-        # smooth factors (0..1), smaller = smoother
         
         joint_deltas = self._cpg.compute_joint_targets(
             frequency=self._cpg_frequency,
@@ -130,31 +135,64 @@ class SpiderbotEnv(DirectRLEnv):
             leg_phase_offsets=self._cpg_phases
         )
         
-        
         self._processed_actions = joint_deltas + self._robot.data.default_joint_pos
+        
+        # === NEW: Update command history ===
+        if self._cmd_history_len > 0:
+            self._cmd_hist = torch.roll(self._cmd_hist, shifts=1, dims=1)
+            self._cmd_hist[:, 0, :] = self._commands
 
     def _apply_action(self):
         self._robot.set_joint_position_target(self._processed_actions)
 
     def _get_observations(self) -> dict:
-        obs = torch.cat(
-            [
-                tensor
-                for tensor in (
-                    self._robot.data.root_lin_vel_b,
-                    self._robot.data.root_ang_vel_b,
-                    self._robot.data.projected_gravity_b,
-                    self._commands,
-                    self._robot.data.joint_pos - self._robot.data.default_joint_pos,
-                    self._robot.data.joint_vel,
-                    self._actions,
-                )
-                if tensor is not None
-            ],
-            dim=-1,
-        )
-        observations = {"policy": obs}
-        return observations
+        """
+        Asymmetric Actor-Critic Observations:
+        
+        Actor (sensor-less, deployable on real robot):
+            - commands [3]
+            - command history [15]
+            - CPG phase sin/cos [2]
+            - previous actions [17]
+            Total: 37
+            
+        Critic (privileged, training only):
+            - actor obs [37]
+            - root_lin_vel_b [3]
+            - root_ang_vel_b [3]
+            - projected_gravity_b [3]
+            - joint_pos relative [12]
+            - joint_vel [12]
+            Total: 70
+        """
+        # === ACTOR OBSERVATIONS (sensor-less) ===
+        # CPG phase features
+        cpg_phase = self._cpg.cpg.phase_angle()  # (N, 1)
+        sin_phase = torch.sin(cpg_phase)
+        cos_phase = torch.cos(cpg_phase)
+        
+        actor_obs = torch.cat([
+            self._commands,                                    # [3]
+            self._cmd_hist.reshape(self.num_envs, -1),        # [15]
+            sin_phase,                                         # [1]
+            cos_phase,                                         # [1]
+            self._previous_actions,                            # [17]
+        ], dim=-1)  # Total: 37
+        
+        # === CRITIC OBSERVATIONS (privileged) ===
+        critic_obs = torch.cat([
+            actor_obs,                                                              # [37]
+            self._robot.data.root_lin_vel_b,                                       # [3]
+            self._robot.data.root_ang_vel_b,                                       # [3]
+            self._robot.data.projected_gravity_b,                                  # [3]
+            self._robot.data.joint_pos - self._robot.data.default_joint_pos,      # [12]
+            self._robot.data.joint_vel,                                            # [12]
+        ], dim=-1)  # Total: 70
+        
+        return {
+            "policy": actor_obs,
+            "critic": critic_obs,
+        }
 
     def _get_rewards(self) -> torch.Tensor:
         # linear velocity tracking
@@ -175,7 +213,6 @@ class SpiderbotEnv(DirectRLEnv):
         action_rate = torch.sum(torch.square(self._actions - self._previous_actions), dim=1)
         # flat orientation
         flat_orientation = torch.sum(torch.square(self._robot.data.projected_gravity_b[:, :2]), dim=1)
-        
 
         rewards = {
             "track_lin_vel_xy_exp": lin_vel_error_mapped * self.cfg.lin_vel_reward_scale * self.step_dt,
@@ -194,88 +231,91 @@ class SpiderbotEnv(DirectRLEnv):
         return reward
 
     def _get_dones(self):
-
         time_out = self.episode_length_buf >= self.max_episode_length - 1
         # Base height
         try:
             base_z = self._robot.data.root_pos_w[:, 2]
         except AttributeError:
             base_z = self._robot.data.root_state_w[:, 2]
-        too_low = base_z < self._min_base_z  
+        too_low = base_z < self._min_base_z
         # Tilt from projected gravity (body up vs world up)
-        g_b = self._robot.data.projected_gravity_b  # [E,3], points down in body frame
+        g_b = self._robot.data.projected_gravity_b
         g_norm = torch.linalg.norm(g_b, dim=1).clamp(min=1e-6)
         cos_tilt = torch.abs(g_b[:, 2]) / g_norm
         too_tilted = cos_tilt < self._max_tilt_cos
-        # Sustained base contact using contact force history (no ground filter needed)
-        net_forces = self._contact_sensor.data.net_forces_w_history  # [E,H,B,3]
+        # Sustained base contact using contact force history
+        net_forces = self._contact_sensor.data.net_forces_w_history
         base_id = self._base_id if isinstance(self._base_id, int) else int(self._base_id[0])
-        base_force_hist = torch.linalg.norm(net_forces[:, :, base_id], dim=-1)  # [E,H]
-        base_force_max = torch.max(base_force_hist, dim=1)[0]                   # [E]
+        base_force_hist = torch.linalg.norm(net_forces[:, :, base_id], dim=-1)
+        base_force_max = torch.max(base_force_hist, dim=1)[0]
         touching = base_force_max > self._min_contact_force
         self._contact_hits = torch.where(touching, self._contact_hits + 1, torch.zeros_like(self._contact_hits))
         sustained_touch = self._contact_hits >= self._contact_frames_needed
         bad_state = ~torch.isfinite(self._robot.data.joint_pos).all(dim=1)
         died = too_low | too_tilted | sustained_touch | bad_state
         return died, time_out
+
     def _reset_idx(self, env_ids: torch.Tensor | None):
         # Normalize env_ids
         if env_ids is None or len(env_ids) == self.num_envs:
             env_ids = self._robot._ALL_INDICES
-    
+
         # Reset robot & parent class
         self._robot.reset(env_ids)
         super()._reset_idx(env_ids)
-    
+
         # Spread out resets to avoid spikes
         if len(env_ids) == self.num_envs:
             self.episode_length_buf[:] = torch.randint_like(self.episode_length_buf, high=int(self.max_episode_length))
-    
+
         # Reset CPG state
         self._cpg.reset(env_ids)
         self._contact_hits[env_ids] = 0
-    
+
         # Initialize CPG parameters to CENTER of action range
         self._cpg_frequency[env_ids] = (self.cfg.cpg_frequency_min + self.cfg.cpg_frequency_max) / 2.0
         self._cpg_amplitudes[env_ids] = (self.cfg.cpg_amplitude_min + self.cfg.cpg_amplitude_max) / 2.0
         self._cpg_phases[env_ids] = 0.0
-                # after setting _cpg_frequency/_cpg_amplitudes/_cpg_phases
-        self._prev_amp[env_ids]   = self._cpg_amplitudes[env_ids]
+        self._prev_amp[env_ids] = self._cpg_amplitudes[env_ids]
         self._prev_phase[env_ids] = self._cpg_phases[env_ids]
-        # you already do:
-        # self._previous_frequency[env_ids] = self._cpg_frequency[env_ids]
-
         self._previous_frequency[env_ids] = self._cpg_frequency[env_ids]
         self._actions[env_ids] = 0.0
         self._previous_actions[env_ids] = 0.0
-    
+        
+        # === NEW: Reset command history ===
+        if self._cmd_history_len > 0:
+            self._cmd_hist[env_ids] = 0.0
+
         # Sample new commands per curriculum
         cmds = torch.zeros_like(self._commands[env_ids])
         self.curriculum_level = 0
         if self.curriculum_level == 0:
-            cmds[:, 0] = 0.3; 
-            cmds[:, 1] = 0.0; 
+            cmds[:, 0] = 0.3
+            cmds[:, 1] = 0.0
             cmds[:, 2] = 0.0
         elif self.curriculum_level == 1:
-            cmds[:, 0].uniform_(0.1, 0.3); 
-            cmds[:, 1] = 0.0; 
+            cmds[:, 0].uniform_(0.1, 0.3)
+            cmds[:, 1] = 0.0
             cmds[:, 2] = 0.0
         elif self.curriculum_level == 2:
-            cmds[:, 0].uniform_(0.1, 0.22); 
-            cmds[:, 1] = 0.0; 
+            cmds[:, 0].uniform_(0.1, 0.22)
+            cmds[:, 1] = 0.0
             cmds[:, 2].uniform_(-0.1, 0.1)
         else:
-            cmds[:, 0].uniform_(-0.5, 0.5); 
-            cmds[:, 1].uniform_(-0.1, 0.1); 
+            cmds[:, 0].uniform_(-0.5, 0.5)
+            cmds[:, 1].uniform_(-0.1, 0.1)
             cmds[:, 2].uniform_(-0.3, 0.3)
-            
-    # user intent -> body frame (Isaac: +Y is left)
-        cmds_b = torch.zeros_like(cmds)
-        cmds_b[:, 0] =  -cmds[:, 1]   # body X  <= forward
-        cmds_b[:, 1] = -cmds[:, 0]   # body Y  <= - right  (because +Y left in Isaac)
-        cmds_b[:, 2] =  cmds[:, 2]   # yaw (flip sign later if needed)
-        self._commands[env_ids] = cmds_b
 
+        # user intent -> body frame (Isaac: +Y is left)
+        cmds_b = torch.zeros_like(cmds)
+        cmds_b[:, 0] = -cmds[:, 1]
+        cmds_b[:, 1] = -cmds[:, 0]
+        cmds_b[:, 2] = cmds[:, 2]
+        self._commands[env_ids] = cmds
+        
+        # === NEW: Initialize command history with current command ===
+        if self._cmd_history_len > 0:
+            self._cmd_hist[env_ids, :, :] = cmds.unsqueeze(1).expand(-1, self._cmd_history_len, -1)
 
         # Reset robot state at env origins
         joint_pos = self._robot.data.default_joint_pos[env_ids]
@@ -285,10 +325,10 @@ class SpiderbotEnv(DirectRLEnv):
         self._robot.write_root_pose_to_sim(default_root_state[:, :7], env_ids)
         self._robot.write_root_velocity_to_sim(default_root_state[:, 7:], env_ids)
         self._robot.write_joint_state_to_sim(joint_pos, joint_vel, None, env_ids)
-    
+
         # This removes the initial jerk by aligning PD targets to the actual pose at reset.
         self._robot.set_joint_position_target(self._robot.data.joint_pos)
-    
+
         # Logging
         extras = dict()
         for key in self._episode_sums.keys():
@@ -300,4 +340,3 @@ class SpiderbotEnv(DirectRLEnv):
         extras = dict()
         extras["Episode_Termination/time_out"] = torch.count_nonzero(self.reset_time_outs[env_ids]).item()
         self.extras["log"].update(extras)
-    

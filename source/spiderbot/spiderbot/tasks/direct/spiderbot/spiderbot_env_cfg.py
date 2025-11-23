@@ -11,7 +11,6 @@ from isaaclab.terrains import TerrainImporterCfg
 from isaaclab.utils import configclass
 from isaaclab.sensors import ContactSensorCfg
 
-# ✅ Import your robot config
 from .spiderbot_cfg import SPIDERBOT_CFG
 
 
@@ -49,12 +48,30 @@ class SpiderbotEnvCfg(DirectRLEnvCfg):
     # Environment settings
     episode_length_s = 20.0
     decimation = 4
-    
-    # Action/observation spaces
-    action_space = 17      # 1 freq + 12 amp + 4 phase
-    observation_space = 53
-    state_space = 0
     action_scale = 1.0
+    
+    # Action space: 1 freq + 12 amp + 4 phase = 17
+    action_space = 17
+
+    # ========== ASYMMETRIC ACTOR-CRITIC OBSERVATION SPACES ==========
+    # Actor (sensor-less, deployable on real robot):
+    #   - commands: 3
+    #   - command history: 3 * 5 = 15
+    #   - CPG phase (sin, cos): 2
+    #   - previous actions: 17
+    # Total: 3 + 15 + 2 + 17 = 37
+    cmd_history_len = 5
+    observation_space = 37
+    
+    # Critic (privileged, training only):
+    #   - actor obs: 37
+    #   - root_lin_vel_b: 3
+    #   - root_ang_vel_b: 3
+    #   - projected_gravity_b: 3
+    #   - joint_pos (relative): 12
+    #   - joint_vel: 12
+    # Total: 37 + 33 = 70
+    state_space = 70
 
     # Simulation
     sim: SimulationCfg = SimulationCfg(
@@ -73,7 +90,7 @@ class SpiderbotEnvCfg(DirectRLEnvCfg):
     terrain = TerrainImporterCfg(
         prim_path="/World/ground",
         terrain_type="plane",
-        collision_group=0,  # ✅ Enable collisions (not -1)
+        collision_group=0,
         physics_material=sim_utils.RigidBodyMaterialCfg(
             friction_combine_mode="multiply",
             restitution_combine_mode="multiply",
@@ -94,7 +111,7 @@ class SpiderbotEnvCfg(DirectRLEnvCfg):
 
     # Scene
     scene: InteractiveSceneCfg = InteractiveSceneCfg(
-        num_envs=200,
+        num_envs=4096,
         env_spacing=2.0,
         replicate_physics=True
     )
@@ -102,18 +119,18 @@ class SpiderbotEnvCfg(DirectRLEnvCfg):
     # Events
     events: EventCfg = EventCfg()
 
-    # ✅ Robot - Clean and simple!
+    # Robot
     robot = SPIDERBOT_CFG.replace(prim_path="/World/envs/env_.*/Robot")
 
     # CPG parameters
-    cpg_frequency_min = 0.0
+    cpg_frequency_min = 0.5
     cpg_frequency_max = 3.0
     cpg_amplitude_min = 0.0
     cpg_amplitude_max = 0.6
     cpg_phase_min = -1.2
     cpg_phase_max = +1.2
 
-    # Reward scales
+    # Reward scales (unchanged)
     lin_vel_reward_scale = 5.0
     yaw_rate_reward_scale = 1.5
     z_vel_reward_scale = -2.0
@@ -122,5 +139,3 @@ class SpiderbotEnvCfg(DirectRLEnvCfg):
     joint_accel_reward_scale = -5e-7
     action_rate_reward_scale = -0.01
     flat_orientation_reward_scale = -5.0
-
-
