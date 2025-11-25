@@ -195,7 +195,15 @@ class SpiderbotEnv(DirectRLEnv):
         }
 
     def _get_rewards(self) -> torch.Tensor:
-        # linear velocity tracking
+        # ========== DIRECT BODY FRAME COMMANDS ==========
+        # commands[:, 0] = body X velocity (toward FL+RL side)
+        # commands[:, 1] = body Y velocity (toward RL+RR side)
+        # commands[:, 2] = yaw rate
+        # 
+        # The CPG trot gait naturally produces body +X motion.
+        # Accept this as "forward" in training. Remap on real robot if needed.
+        
+        # linear velocity tracking (direct body frame)
         lin_vel_error = torch.sum(torch.square(self._commands[:, :2] - self._robot.data.root_lin_vel_b[:, :2]), dim=1)
         lin_vel_error_mapped = torch.exp(-lin_vel_error / 0.25)
         # yaw rate tracking
@@ -306,11 +314,7 @@ class SpiderbotEnv(DirectRLEnv):
             cmds[:, 1].uniform_(-0.1, 0.1)
             cmds[:, 2].uniform_(-0.3, 0.3)
 
-        # user intent -> body frame (Isaac: +Y is left)
-        cmds_b = torch.zeros_like(cmds)
-        cmds_b[:, 0] = -cmds[:, 1]
-        cmds_b[:, 1] = -cmds[:, 0]
-        cmds_b[:, 2] = cmds[:, 2]
+       
         self._commands[env_ids] = cmds
         
         # === NEW: Initialize command history with current command ===
