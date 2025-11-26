@@ -306,9 +306,9 @@ class SpiderbotEnv(DirectRLEnv):
             cmds[:, 1] = 0.0
             cmds[:, 2] = 0.0
         elif self.curriculum_level == 2:
-            cmds[:, 0].uniform_(0.1, 0.22)
+            cmds[:, 0].uniform_(0.0, 0.5)
             cmds[:, 1] = 0.0
-            cmds[:, 2].uniform_(-0.1, 0.1)
+            cmds[:, 2].uniform_(-0.0, 0.0)
         else:
             cmds[:, 0].uniform_(-0.5, 0.5)
             cmds[:, 1].uniform_(-0.1, 0.1)
