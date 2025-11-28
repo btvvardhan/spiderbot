@@ -23,19 +23,20 @@ class EventCfg:
         mode="startup",
         params={
             "asset_cfg": SceneEntityCfg("robot", body_names=".*"),
-            "static_friction_range": (1.0, 1.2),
-            "dynamic_friction_range": (0.8, 1.0),
+            "static_friction_range": (0.7, 1.3),
+            "dynamic_friction_range": (0.6, 1.0),
             "restitution_range": (0.0, 0.0),
             "num_buckets": 64,
         },
     )
     
+    # Asymmetric mass randomization (payloads typically added, not removed)
     add_base_mass = EventTerm(
         func=mdp.randomize_rigid_body_mass,
         mode="startup",
         params={
             "asset_cfg": SceneEntityCfg("robot", body_names="base_link"),
-            "mass_distribution_params": (0.5, 1.5),
+            "mass_distribution_params": (-0.3, 0.5),  # -0.3kg to +0.5kg
             "operation": "add",
         },
     )
@@ -43,45 +44,28 @@ class EventCfg:
 
 @configclass
 class SpiderbotEnvCfg(DirectRLEnvCfg):
-    """Configuration for Spider Bot CPG-RL environment."""
+    """Configuration for 3kg Spider Bot CPG-RL environment."""
     
     # Environment settings
     episode_length_s = 20.0
     decimation = 4
     action_scale = 1.0
-    
-    # Action space: 1 freq + 12 amp + 4 phase = 17
     action_space = 17
-
-    # ========== ASYMMETRIC ACTOR-CRITIC OBSERVATION SPACES ==========
-    # Actor (sensor-less, deployable on real robot):
-    #   - commands: 3
-    #   - command history: 3 * 5 = 15
-    #   - CPG phase (sin, cos): 2
-    #   - previous actions: 17
-    # Total: 3 + 15 + 2 + 17 = 37
-    cmd_history_len = 5
-    observation_space = 37
     
-    # Critic (privileged, training only):
-    #   - actor obs: 37
-    #   - root_lin_vel_b: 3
-    #   - root_ang_vel_b: 3
-    #   - projected_gravity_b: 3
-    #   - joint_pos (relative): 12
-    #   - joint_vel: 12
-    # Total: 37 + 33 = 70
-    state_space = 70
+    # Asymmetric actor-critic observations
+    cmd_history_len = 5
+    observation_space = 37  # Actor (sensor-less, deployable)
+    state_space = 70        # Critic (privileged, training only)
 
     # Simulation
     sim: SimulationCfg = SimulationCfg(
-        dt=1 / 200,
+        dt=1 / 200,  # 200 Hz physics
         render_interval=decimation,
         physics_material=sim_utils.RigidBodyMaterialCfg(
             friction_combine_mode="multiply",
             restitution_combine_mode="multiply",
-            static_friction=1.2,
-            dynamic_friction=1.0,
+            static_friction=1.0,
+            dynamic_friction=0.8,
             restitution=0.0,
         ),
     )
@@ -94,8 +78,8 @@ class SpiderbotEnvCfg(DirectRLEnvCfg):
         physics_material=sim_utils.RigidBodyMaterialCfg(
             friction_combine_mode="multiply",
             restitution_combine_mode="multiply",
-            static_friction=1.2,
-            dynamic_friction=1.0,
+            static_friction=1.0,
+            dynamic_friction=0.8,
             restitution=0.0,
         ),
         debug_vis=False,
@@ -112,7 +96,7 @@ class SpiderbotEnvCfg(DirectRLEnvCfg):
     # Scene
     scene: InteractiveSceneCfg = InteractiveSceneCfg(
         num_envs=4096,
-        env_spacing=2.0,
+        env_spacing=2.5,  # Slightly more space for 3kg robot
         replicate_physics=True
     )
 
@@ -122,20 +106,24 @@ class SpiderbotEnvCfg(DirectRLEnvCfg):
     # Robot
     robot = SPIDERBOT_CFG.replace(prim_path="/World/envs/env_.*/Robot")
 
-    # CPG parameters
-    cpg_frequency_min = 0.5
-    cpg_frequency_max = 3.0
-    cpg_amplitude_min = 0.0
-    cpg_amplitude_max = 0.6
-    cpg_phase_min = -1.2
-    cpg_phase_max = +1.2
+    # CPG parameter ranges - CONSERVATIVE for initial training
+    # These will produce slow, stable gaits suitable for 3kg robot
+    cpg_frequency_min = 0.8    # ~0.8 Hz = slow walk
+    cpg_frequency_max = 1.8    # ~1.8 Hz = moderate trot
+    cpg_amplitude_min = 0.05   # Small movements
+    cpg_amplitude_max = 0.25   # Conservative max (your legs are long!)
+    cpg_phase_min = -0.2       # Tight phase coupling
+    cpg_phase_max = +0.2
 
-    # Reward scales (unchanged)
-    lin_vel_reward_scale = 5.0
-    yaw_rate_reward_scale = 1.5
-    z_vel_reward_scale = -2.0
-    ang_vel_reward_scale = -0.05
-    joint_torque_reward_scale = -1e-5
-    joint_accel_reward_scale = -5e-7
-    action_rate_reward_scale = -0.01
-    flat_orientation_reward_scale = -5.0
+    # Reward scales - PHASE 1 (walking)
+    lin_vel_reward_scale = 15.0
+    lin_vel_exp_scale = 0.25
+    yaw_rate_reward_scale = 0.5
+    yaw_rate_exp_scale = 0.25
+    z_vel_reward_scale = -5.0
+    ang_vel_reward_scale = -0.2
+    joint_torque_reward_scale = -3e-5
+    joint_accel_reward_scale = -2e-6
+    action_rate_reward_scale = -0.003
+    flat_orientation_reward_scale = -12.0
+    alive_reward_scale = 1.5

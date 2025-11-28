@@ -6,22 +6,16 @@ from isaaclab.assets import ArticulationCfg
 from isaaclab.utils import configclass
 
 
-##
-# Spider Bot Configuration
-##
-
 SPIDERBOT_CFG = ArticulationCfg(
     spawn=sim_utils.UsdFileCfg(
         usd_path="/home/teja/spiderbot/assets/spidy/spiderbot.usd",
         
-        # Articulation properties
         articulation_props=sim_utils.ArticulationRootPropertiesCfg(
-            enabled_self_collisions=False,  # ✅ Prevent leg interference
+            enabled_self_collisions=False,
             solver_position_iteration_count=8,
             solver_velocity_iteration_count=4,
         ),
         
-        # Rigid body properties
         rigid_props=sim_utils.RigidBodyPropertiesCfg(
             disable_gravity=False,
             retain_accelerations=False,
@@ -32,27 +26,42 @@ SPIDERBOT_CFG = ArticulationCfg(
             max_depenetration_velocity=1.0,
         ),
         
-        # Enable contact sensors
         activate_contact_sensors=True,
     ),
     
-    # Initial state
+    # Initial state - OPTIMIZED FOR YOUR DIMENSIONS
     init_state=ArticulationCfg.InitialStateCfg(
-        pos=(0.0, 0.0, 0.35),  # ✅ Lower spawn height (was 0.15)
-        rot=(1.0, 0.0, 0.0, 0.0),  # 90 deg about z-axis
+        pos=(0.0, 0.0, 0.25),  # Spawn at 25cm, will settle to ~13cm
+        rot=(1.0, 0.0, 0.0, 0.0),
         
-        
-        # Joint positions - neutral stance
+        # STABLE CROUCHED STANCE
+        # Calculated for: coxa=55mm, femur=80mm, tibia=150mm
+        # Target standing height: ~130mm
         joint_pos={
-            "fl_coxa_joint":  0.0,   "fl_femur_joint":  0.0,   "fl_tibia_joint":  0.0,
-            "fr_coxa_joint":  0.0,   "fr_femur_joint":  0.0,   "fr_tibia_joint":  0.0,
-            "rl_coxa_joint":  0.0,   "rl_femur_joint":  0.0,   "rl_tibia_joint":  0.0,
-            "rr_coxa_joint":  0.0,   "rr_femur_joint":  0.0,   "rr_tibia_joint":  0.0,
+            # Front Left
+            "fl_coxa_joint":   0.0,    # Neutral (forward-back alignment)
+            "fl_femur_joint":  -0.5,    # Lift femur ~34°
+            "fl_tibia_joint": -0.9,    # Bend tibia ~57° downward
+            
+            # Front Right
+            "fr_coxa_joint":   0.0,
+            "fr_femur_joint":  -0.5,
+            "fr_tibia_joint": 0.9,
+            
+            # Rear Left
+            "rl_coxa_joint":   0.0,
+            "rl_femur_joint":  -0.5,
+            "rl_tibia_joint": 0.9,
+            
+            # Rear Right
+            "rr_coxa_joint":   0.0,
+            "rr_femur_joint":  -0.5,
+            "rr_tibia_joint": 0.9,
         },
         joint_vel={".*": 0.0},
     ),
     
-    # Actuators - PD controllers
+    # Actuators - Tuned PD gains for 3kg robot
     actuators={
         "legs": ImplicitActuatorCfg(
             joint_names_expr=[
@@ -62,13 +71,12 @@ SPIDERBOT_CFG = ArticulationCfg(
                 "rr_coxa_joint",  "rr_femur_joint",  "rr_tibia_joint",
             ],
             
-            # ✅ CRITICAL: Correct PD gains (not 100/4!)
-            stiffness=10000.0,      # High stiffness for position tracking
-            damping=100.0,          # Appropriate damping for smooth motion
+            # PD gains optimized for DS3225 servos + 3kg load
+            stiffness=2500.0,   # Moderate stiffness
+            damping=40.0,       # Light damping for responsiveness
             
-            # Effort and velocity limits
-            effort_limit_sim=100.0,    # Max torque per joint (Nm)
-            velocity_limit_sim=5.0,   # Max angular velocity (rad/s)
+            effort_limit_sim=100.0,   # DS3225 spec: ~20kg.cm ≈ 2Nm per joint
+            velocity_limit_sim=10.0,  # ~5 rad/s is realistic for servos
         ),
     },
 )
