@@ -41,22 +41,22 @@ SPIDERBOT_CFG = ArticulationCfg(
             # Front Left
             "fl_coxa_joint":   0.0,    # Neutral (forward-back alignment)
             "fl_femur_joint":  -0.5,    # Lift femur ~34°
-            "fl_tibia_joint": -0.9,    # Bend tibia ~57° downward
+            "fl_tibia_joint": -0.5,    # Bend tibia ~57° downward
             
             # Front Right
             "fr_coxa_joint":   0.0,
             "fr_femur_joint":  -0.5,
-            "fr_tibia_joint": 0.9,
+            "fr_tibia_joint": 0.5,
             
             # Rear Left
             "rl_coxa_joint":   0.0,
             "rl_femur_joint":  -0.5,
-            "rl_tibia_joint": 0.9,
+            "rl_tibia_joint": 0.5,
             
             # Rear Right
             "rr_coxa_joint":   0.0,
             "rr_femur_joint":  -0.5,
-            "rr_tibia_joint": 0.9,
+            "rr_tibia_joint": 0.5,
         },
         joint_vel={".*": 0.0},
     ),

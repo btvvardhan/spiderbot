@@ -9,7 +9,7 @@ class HopfCPG:
         self.freq_floor = freq_floor_hz
         self.x = torch.zeros(num_envs, 1, device=device)
         self.y = torch.zeros(num_envs, 1, device=device)
-        self.alpha = 50.0  # Increased from 8.0 for faster convergence
+        self.alpha = 50.0
         self.reset(torch.arange(num_envs, device=device))
 
     def reset(self, env_ids: torch.Tensor):
@@ -32,43 +32,51 @@ class HopfCPG:
 
     @torch.no_grad()
     def phase_angle(self) -> torch.Tensor:
-        """Return current oscillator angle φ in [-π,π] per env (N,1)."""
         return torch.atan2(self.y, self.x)
 
 
-class SpiderCPG:
+class SpiderCPG_Walk:
     """
-    CPG with diagonal coupling for trot gait.
-    k_phase: phase coupling strength (0=independent, 1=identical)
-    k_amp: amplitude coupling strength (0=independent, 1=identical)
+    CPG for WALK gait (3 legs always on ground, sequential lifting).
+    
+    Walk sequence: FL → RR → RL → FR (diagonal pairs alternating)
+    Phase offsets: FL=0°, RR=90°, RL=180°, FR=270°
+    
+    This is more stable than trot at low speeds.
     """
-    def __init__(self, num_envs: int, dt: float, device: str, k_phase: float = 0.8, k_amp: float = 0.9):
+    def __init__(self, num_envs: int, dt: float, device: str, k_phase: float = 0.6, k_amp: float = 0.7):
         self.num_envs = num_envs
         self.dt = dt
         self.device = device
-        self.k_phase = float(k_phase)  # Increased from 0.7
-        self.k_amp = float(k_amp)      # Increased from 1.0
+        self.k_phase = float(k_phase)  # Lower coupling for walk (more independence)
+        self.k_amp = float(k_amp)
         self.cpg = HopfCPG(num_envs, dt=dt, device=device)
 
-        # Trot phases: FL and RR in phase, FR and RL in phase (opposite to first pair)
-        leg_phases = torch.tensor([0.0, math.pi, math.pi, 0.0], device=device)
+        # WALK GAIT PHASES: Sequential leg lifting
+        # FL → RR → RL → FR (90° apart)
+        leg_phases = torch.tensor([
+            0.0,           # FL starts
+            0.5 * math.pi, # RR follows (90° later)
+            math.pi,       # RL follows (180° later)
+            1.5 * math.pi, # FR follows (270° later)
+        ], device=device)
 
-        # Intra-leg offsets for femur/tibia lift timing
+        # Intra-leg offsets: femur/tibia lift during swing
         intra = torch.tensor([
-            0.0,  +0.4*math.pi,  +0.6*math.pi,  # FL: coxa, femur, tibia
-            0.0,  +0.4*math.pi,  +0.6*math.pi,  # FR
-            0.0,  +0.4*math.pi,  +0.6*math.pi,  # RL
-            0.0,  +0.4*math.pi,  +0.6*math.pi,  # RR
+            0.0,  +0.3*math.pi,  +0.5*math.pi,  # FL
+            0.0,  +0.3*math.pi,  +0.5*math.pi,  # RR
+            0.0,  +0.3*math.pi,  +0.5*math.pi,  # RL
+            0.0,  +0.3*math.pi,  +0.5*math.pi,  # FR
         ], device=device).unsqueeze(0)
 
         self.default_joint_phases = leg_phases.repeat_interleave(3).unsqueeze(0) + intra
 
-        # Joint-type scaling: coxa does most work, femur/tibia assist
+        # Joint-type scaling for walk (more conservative)
         self.joint_type_scales = torch.tensor([
-            1.0, 0.4, 0.3,  # FL: higher femur contribution
-            1.0, 0.4, 0.3,  # FR
-            1.0, 0.4, 0.3,  # RL
-            1.0, 0.4, 0.3,  # RR
+            1.0, 0.35, 0.25,  # FL
+            1.0, 0.35, 0.25,  # RR
+            1.0, 0.35, 0.25,  # RL
+            1.0, 0.35, 0.25,  # FR
         ], device=device).unsqueeze(0)
 
     def reset(self, env_ids: torch.Tensor):
@@ -76,28 +84,29 @@ class SpiderCPG:
 
     @torch.no_grad()
     def _couple_diagonal_phases(self, leg_phase_offsets: torch.Tensor) -> torch.Tensor:
-        """Soft couple diagonal leg phases (FL↔RR, FR↔RL)."""
-        phi = leg_phase_offsets  # (N,4) [FL, FR, RL, RR]
-        d0 = 0.5 * (phi[:, 0:1] + phi[:, 3:4])  # FL & RR average
-        d1 = 0.5 * (phi[:, 1:2] + phi[:, 2:3])  # FR & RL average
-        coupled = torch.cat([d0, d1, d1, d0], dim=1)
+        """Light coupling for walk gait (legs more independent)."""
+        phi = leg_phase_offsets  # (N,4) [FL, RR, RL, FR]
+        # For walk, we still want some diagonal coordination but less strict
+        d0 = 0.5 * (phi[:, 0:1] + phi[:, 1:2])  # FL & RR
+        d1 = 0.5 * (phi[:, 2:3] + phi[:, 3:4])  # RL & FR
+        coupled = torch.cat([d0, d0, d1, d1], dim=1)
         return (1.0 - self.k_phase) * phi + self.k_phase * coupled
 
     @torch.no_grad()
     def _couple_diagonal_amplitudes(self, amplitudes: torch.Tensor) -> torch.Tensor:
-        """Soft couple diagonal leg amplitudes."""
+        """Light amplitude coupling for walk gait."""
         N = amplitudes.shape[0]
-        amps = amplitudes.view(N, 4, 3)  # (N, 4legs, 3joints)
+        amps = amplitudes.view(N, 4, 3)
         
-        # Average diagonal pairs
-        avg0 = 0.5 * (amps[:, 0, :] + amps[:, 3, :])  # FL & RR
-        avg1 = 0.5 * (amps[:, 1, :] + amps[:, 2, :])  # FR & RL
+        # Couple FL-RR and RL-FR pairs
+        avg0 = 0.5 * (amps[:, 0, :] + amps[:, 1, :])
+        avg1 = 0.5 * (amps[:, 2, :] + amps[:, 3, :])
         
         k = self.k_amp
         amps[:, 0, :] = (1 - k) * amps[:, 0, :] + k * avg0
-        amps[:, 3, :] = (1 - k) * amps[:, 3, :] + k * avg0
-        amps[:, 1, :] = (1 - k) * amps[:, 1, :] + k * avg1
+        amps[:, 1, :] = (1 - k) * amps[:, 1, :] + k * avg0
         amps[:, 2, :] = (1 - k) * amps[:, 2, :] + k * avg1
+        amps[:, 3, :] = (1 - k) * amps[:, 3, :] + k * avg1
         
         return amps.reshape(N, 12)
 
@@ -107,15 +116,10 @@ class SpiderCPG:
         amplitudes: torch.Tensor,
         leg_phase_offsets: torch.Tensor
     ) -> torch.Tensor:
-        # Couple phases and amplitudes
         leg_phase_offsets = self._couple_diagonal_phases(leg_phase_offsets)
         amplitudes = self._couple_diagonal_amplitudes(amplitudes)
         
-        # Expand to joint phases
         joint_phases = leg_phase_offsets.repeat_interleave(3, dim=1) + self.default_joint_phases
-        
-        # Apply joint-type scaling
         scaled_amplitudes = amplitudes * self.joint_type_scales
         
-        # Generate oscillations
         return self.cpg.step(frequency, scaled_amplitudes, joint_phases)
