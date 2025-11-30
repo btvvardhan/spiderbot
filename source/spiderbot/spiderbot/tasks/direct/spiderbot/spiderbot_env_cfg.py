@@ -171,9 +171,9 @@ class SpiderbotEnvCfg(DirectRLEnvCfg):
     # ========== COMMAND RANGES ==========
     # Multi-task training (sample all directions)
     command_ranges = {
-        "lin_vel_x": (0.3, 0.3),    # m/s
-        "lin_vel_y": (-0.0, 0.0),    # m/s
-        "ang_vel_yaw": (-0.0, 0.0),  # rad/s
+        "lin_vel_x": (0.0, 0.5),    # m/s
+        "lin_vel_y": (-0.3, 0.3),    # m/s
+        "ang_vel_yaw": (-0.3, 0.3),  # rad/s
     }
 
     # ========== REWARD SCALES ==========
