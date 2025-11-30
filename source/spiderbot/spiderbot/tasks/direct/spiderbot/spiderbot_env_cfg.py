@@ -1,6 +1,20 @@
-"""Configuration for Model-Based Spider Bot with IK + RL residuals."""
+"""Environment Configuration for VDP-CPG Spider Robot with IMU-Aware Actor
 
-import math
+Key improvements over previous CPG-RL:
+1. Van der Pol oscillators (better biological realism, duty cycle control)
+2. Actor now includes IMU data (deployable with real IMU)
+3. Richer CPG phase information (8D instead of 2D)
+4. Multi-gait capability through learned phase relationships
+5. Better reward structure for dynamic locomotion
+
+Observation Design Philosophy:
+- Actor sees ONLY what's available on real robot: commands, IMU, CPG phases
+- No joint encoders needed (sensor-less joint control)
+- Critic uses full privileged state for better training
+"""
+
+import isaaclab.envs.mdp as mdp
+import isaaclab.sim as sim_utils
 from isaaclab.envs import DirectRLEnvCfg
 from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.managers import SceneEntityCfg
@@ -9,23 +23,32 @@ from isaaclab.sim import SimulationCfg
 from isaaclab.terrains import TerrainImporterCfg
 from isaaclab.utils import configclass
 from isaaclab.sensors import ContactSensorCfg
-import isaaclab.sim as sim_utils
-import isaaclab.envs.mdp as mdp
+
 from .spiderbot_cfg import SPIDERBOT_CFG
+
 
 @configclass
 class EventCfg:
-    """Domain randomization events."""
+    """Domain randomization for robust training."""
     
-    # NOTE: physics_material event removed - causes API error in Isaac Lab
-    # Material properties are set at terrain level instead
+    physics_material = EventTerm(
+        func=mdp.randomize_rigid_body_material,
+        mode="startup",
+        params={
+            "asset_cfg": SceneEntityCfg("robot", body_names=".*"),
+            "static_friction_range": (0.8, 1.3),
+            "dynamic_friction_range": (0.6, 1.1),
+            "restitution_range": (0.0, 0.1),
+            "num_buckets": 64,
+        },
+    )
     
     add_base_mass = EventTerm(
         func=mdp.randomize_rigid_body_mass,
         mode="startup",
         params={
             "asset_cfg": SceneEntityCfg("robot", body_names="base_link"),
-            "mass_distribution_params": (-0.2, 0.2),
+            "mass_distribution_params": (-0.3, 0.5),
             "operation": "add",
         },
     )
@@ -35,82 +58,142 @@ class EventCfg:
         mode="startup",
         params={
             "asset_cfg": SceneEntityCfg("robot", joint_names=".*"),
-            "stiffness_distribution_params": (0.8, 1.2),
-            "damping_distribution_params": (0.8, 1.2),
+            "stiffness_distribution_params": (0.75, 1.25),
+            "damping_distribution_params": (0.75, 1.25),
             "operation": "scale",
-            "distribution": "uniform",
         },
     )
 
+
 @configclass
 class SpiderbotEnvCfg(DirectRLEnvCfg):
-    """Model-based configuration with fixed gait + RL residuals."""
+    """VDP-CPG environment with IMU-aware actor."""
     
     # Episode settings
     episode_length_s = 20.0
-    decimation = 4  # 50Hz control (200Hz sim / 4)
+    decimation = 4  # 50 Hz control
     
-    # Command history length
-    obs_cmd_hist_len = 10
+    # ========== ACTION SPACE ==========
+    # Policy outputs CPG parameters:
+    #   1: frequency (shared across legs)
+    #   12: amplitudes (per joint)
+    #   4: leg phase offsets (FL, FR, RL, RR)
+    # Total: 17 dimensions
+    action_space = 17
+    action_scale = 1.0
     
-    # Action and observation spaces
-    action_space = 12  # 12 joint angle residuals
-    observation_space = 30  # 3 * obs_cmd_hist_len (command history - actor)
-    state_space = 65  # Full state for critic: actor(30) + vel(3) + ang_vel(3) + gravity(3) + joint_pos(12) + joint_vel(12) + phase(2)
+    # ========== OBSERVATION SPACES ==========
+    # Actor (deployable with real IMU):
+    #   - commands: 3
+    #   - command history: 3 * 5 = 15
+    #   - IMU linear velocity: 3 (body frame)
+    #   - IMU angular velocity: 3 (body frame)
+    #   - projected gravity: 3 (body frame)
+    #   - CPG phase features: 8 (sin/cos for 4 legs)
+    #   - previous actions: 17
+    # Total: 52 dimensions (IMU-aware!)
+    cmd_history_len = 5
+    observation_space = 52
     
-    # Gait parameters
-    base_gait_frequency = 1.5  # Fixed trot frequency (Hz)
-    max_residual_rad = 0.15  # Limit RL corrections to ±0.15 rad
-    
-    # Simulation settings
+    # Critic (privileged, training only):
+    #   - actor obs: 52
+    #   - joint positions (relative): 12
+    #   - joint velocities: 12
+    # Total: 76 dimensions
+    state_space = 76
+
+    # ========== SIMULATION ==========
     sim: SimulationCfg = SimulationCfg(
-        dt=1.0 / 200.0,
+        dt=1 / 200,  # 200 Hz physics
         render_interval=decimation,
         physics_material=sim_utils.RigidBodyMaterialCfg(
+            friction_combine_mode="multiply",
+            restitution_combine_mode="multiply",
             static_friction=1.0,
             dynamic_friction=0.8,
             restitution=0.0,
         ),
     )
     
-    # Terrain
+    # ========== TERRAIN ==========
     terrain = TerrainImporterCfg(
         prim_path="/World/ground",
         terrain_type="plane",
-        collision_group=-1,
+        collision_group=0,
         physics_material=sim_utils.RigidBodyMaterialCfg(
+            friction_combine_mode="multiply",
+            restitution_combine_mode="multiply",
             static_friction=1.0,
             dynamic_friction=0.8,
             restitution=0.0,
         ),
         debug_vis=False,
     )
-    
-    # Contact sensor
+
+    # ========== SENSORS ==========
     contact_sensor: ContactSensorCfg = ContactSensorCfg(
         prim_path="/World/envs/env_.*/Robot/.*",
-        history_length=3,
+        history_length=5,
         update_period=0.005,
         track_air_time=True,
     )
-    
-    # Scene
+
+    # ========== SCENE ==========
     scene: InteractiveSceneCfg = InteractiveSceneCfg(
         num_envs=4096,
-        env_spacing=2.5,
-        replicate_physics=True,
+        env_spacing=2.0,
+        replicate_physics=True
     )
-    
-    # Domain randomization
+
+    # ========== EVENTS ==========
     events: EventCfg = EventCfg()
-    
-    # Robot configuration
+
+    # ========== ROBOT ==========
     robot = SPIDERBOT_CFG.replace(prim_path="/World/envs/env_.*/Robot")
+
+    # ========== VDP-CPG PARAMETERS ==========
+    # VDP oscillator parameters
+    cpg_mu = 2.5  # Nonlinearity (2-3 good for locomotion)
+    cpg_k_phase = 0.5  # Diagonal phase coupling (0-1)
+    cpg_k_amp = 0.3    # Diagonal amplitude coupling (0-1)
     
-    # Reward weights (tuned for model-based approach)
-    z_vel_reward_scale = -2.0
-    ang_vel_reward_scale = -0.05
-    joint_torque_reward_scale = -1e-5
-    action_rate_reward_scale = -0.01
-    flat_orientation_reward_scale = -5.0
-    residual_magnitude_scale = -0.05  # Encourage small corrections
+    # CPG action ranges (policy outputs in [-1,1], scaled to these)
+    cpg_frequency_min = 0.3
+    cpg_frequency_max = 2.5
+    cpg_amplitude_min = 0.0
+    cpg_amplitude_max = 0.7
+    cpg_phase_min = -1.0  # Phase offset range
+    cpg_phase_max = +1.0
+    
+    # Action smoothing (low-pass filter)
+    action_smoothing_beta = 0.15  # Slightly more smoothing than before
+    
+    # ========== COMMAND RANGES ==========
+    # Multi-task training (sample all directions)
+    command_ranges = {
+        "lin_vel_x": (0.3, 0.3),    # m/s
+        "lin_vel_y": (-0.0, 0.0),    # m/s
+        "ang_vel_yaw": (-0.0, 0.0),  # rad/s
+    }
+
+    # ========== REWARD SCALES ==========
+    # Primary tracking rewards
+    lin_vel_reward_scale = 6.0       # Track linear velocity (increased)
+    yaw_rate_reward_scale = 2.5      # Track yaw rate
+    
+    # Stability penalties
+    z_vel_reward_scale = -2.0        # Minimize vertical motion
+    ang_vel_reward_scale = -0.15     # Minimize roll/pitch rates
+    flat_orientation_reward_scale = -4.0  # Keep body level
+    
+    # Efficiency penalties
+    joint_torque_reward_scale = -3e-5    # Minimize effort
+    joint_accel_reward_scale = -3e-7     # Smooth motion
+    action_rate_reward_scale = -0.015    # Action smoothness
+    
+    # CPG-specific rewards
+    cpg_phase_coherence_reward_scale = 0.5  # Reward coherent phase relationships
+    
+    # Joint limits
+    joint_pos_limit_reward_scale = -15.0
+    joint_pos_limit_margin = 0.1  # rad
