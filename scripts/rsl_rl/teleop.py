@@ -61,6 +61,8 @@ import os
 import time
 import torch
 import carb
+import csv
+from datetime import datetime
 
 from rsl_rl.runners import DistillationRunner, OnPolicyRunner
 
@@ -371,6 +373,19 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     obs = env.get_observations()
     timestep = 0
 
+    # Setup CSV logging
+    csv_log_dir = os.path.join(log_dir, "teleop_logs")
+    os.makedirs(csv_log_dir, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    csv_path = os.path.join(csv_log_dir, f"teleop_log_{timestamp}.csv")
+    
+    # Initialize CSV file (headers will be written after first step when we know dimensions)
+    csv_file = open(csv_path, 'w', newline='')
+    csv_writer = csv.writer(csv_file)
+    
+    headers_written = False
+    start_sim_time = time.time()
+
     print("[INFO] Starting simulation with keyboard control...")
     print("[INFO] Use WASD keys to move, QE to rotate, SPACE to stop, ESC to exit")
     print("[INFO] Press F5 to reset the episode. Focus the viewport window to receive keyboard input!\n")
@@ -426,6 +441,41 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 actions = policy(obs)
                 # Environment stepping
             obs, _, _, _ = env.step(actions)
+            
+            # Get the processed joint targets (12 DOF) after CPG processing
+            if hasattr(env.unwrapped, '_processed_actions'):
+                joint_targets = env.unwrapped._processed_actions
+            else:
+                joint_targets = actions  # Fallback to raw actions if not available
+            
+            # Log to CSV (for first environment only to keep file manageable)
+            try:
+                time_elapsed = time.time() - start_sim_time
+                cmd_list = cmd[0].cpu().tolist()  # Get first env command
+                obs_list = obs[0].cpu().tolist()  # Get first env observation
+                joint_targets_list = joint_targets[0].cpu().tolist()  # Get first env joint targets (12 DOF)
+                
+                # Write headers on first log entry
+                if not headers_written:
+                    headers = ['timestep', 'time_elapsed']
+                    headers.extend(['cmd_forward', 'cmd_lateral', 'cmd_yaw'])
+                    headers.extend([f'obs_{i}' for i in range(len(obs_list))])
+                    headers.extend([f'joint_{i}' for i in range(len(joint_targets_list))])
+                    csv_writer.writerow(headers)
+                    headers_written = True
+                    print(f"[INFO] Logging observations and actions to: {csv_path}")
+                    print(f"[INFO] Logging {len(obs_list)} observations and {len(joint_targets_list)} joint targets")
+                
+                # Prepare row data
+                row = [timestep, time_elapsed]
+                row.extend(cmd_list)
+                row.extend(obs_list)
+                row.extend(joint_targets_list)
+                
+                csv_writer.writerow(row)
+                
+            except Exception as e:
+                print(f"[WARNING] Failed to log to CSV: {e}")
 
             # Handle video recording
             if args_cli.video:
@@ -452,6 +502,14 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         # Cleanup
         print("\n[INFO] Cleaning up...")
         kb_controller.cleanup()
+        
+        # Close CSV file
+        try:
+            csv_file.close()
+            print(f"[INFO] Log saved to: {csv_path}")
+        except:
+            pass
+        
         env.close()
         print("[INFO] Simulation ended successfully")
 
