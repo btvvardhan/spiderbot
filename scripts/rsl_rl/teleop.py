@@ -10,15 +10,6 @@
 import argparse
 import sys
 
-# ROS2 Integration - No workspace needed!
-import os
-os.environ.setdefault('ROS_DOMAIN_ID', '7')
-import rclpy
-from rclpy.node import Node
-from std_msgs.msg import Float64MultiArray
-from geometry_msgs.msg import Twist
-import threading
-
 from isaaclab.app import AppLauncher
 
 # local imports
@@ -55,42 +46,6 @@ args_cli, hydra_args = parser.parse_known_args()
 # always enable cameras to record video
 if args_cli.video:
     args_cli.enable_cameras = True
-
-# ============================================================
-# ROS2 BRIDGE - Publishes joint angles to /joint_commands
-# ============================================================
-class ROS2Bridge(Node):
-    def __init__(self):
-        super().__init__('isaac_sim_bridge')
-        self.joint_pub = self.create_publisher(Float64MultiArray, '/joint_commands', 10)
-        self.cmd_pub = self.create_publisher(Twist, '/cmd_vel_sim', 10)
-        print("[ROS2] ✅ Publishing to /joint_commands")
-        self.count = 0
-    
-    def publish_joints(self, angles):
-        msg = Float64MultiArray()
-        msg.data = angles
-        self.joint_pub.publish(msg)
-        self.count += 1
-        if self.count % 50 == 0:
-            print(f"[ROS2] {self.count} commands sent")
-    
-    def publish_cmd(self, cmd):
-        msg = Twist()
-        msg.linear.x = float(cmd[0])
-        msg.linear.y = float(cmd[1])
-        msg.angular.z = float(cmd[2])
-        self.cmd_pub.publish(msg)
-
-def ros2_spin_thread(node):
-    try:
-        rclpy.spin(node)
-    except:
-        pass
-
-ros2_node = None
-# ============================================================
-
 
 # clear out sys.argv for Hydra
 sys.argv = [sys.argv[0]] + hydra_args
@@ -313,20 +268,6 @@ class CarbKeyboardController:
 @hydra_task_config(args_cli.task, args_cli.agent)
 def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
     """Play with RSL-RL agent using keyboard control."""
-    # ===== INITIALIZE ROS2 =====
-    global ros2_node
-    print("[INFO] Initializing ROS2...")
-    try:
-        rclpy.init()
-        ros2_node = ROS2Bridge()
-        ros2_thread = threading.Thread(target=ros2_spin_thread, args=(ros2_node,), daemon=True)
-        ros2_thread.start()
-        print("[INFO] ✅ ROS2 bridge started")
-    except Exception as e:
-        print(f"[WARN] ROS2 init failed: {e}")
-        ros2_node = None
-    # ===========================
-    
     # grab task name for checkpoint path
     task_name = args_cli.task.split(":")[-1]
     train_task_name = task_name.replace("-Play", "")
@@ -431,6 +372,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # reset environment
     obs = env.get_observations()
     timestep = 0
+    
+    # Determine action dimension once
+    with torch.inference_mode():
+        dummy_actions = policy(obs)
+    action_dim = dummy_actions.shape[-1]
+    print(f"[INFO] Action dimension: {action_dim}")
 
     # Setup CSV logging
     csv_log_dir = os.path.join(log_dir, "teleop_logs")
@@ -494,11 +441,18 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             # Get observations
             obs = env.get_observations()
 
-            # Run inference mode
-            with torch.inference_mode():
-                # Agent stepping
-                actions = policy(obs)
-                # Environment stepping
+            # Check if there's any command (not all zeros)
+            cmd_magnitude = torch.abs(cmd).sum()
+            
+            if cmd_magnitude < 0.01:  # No command - stop the robot
+                # Send zero actions directly without running policy
+                actions = torch.zeros((env.num_envs, action_dim), device=env.unwrapped.device)
+            else:
+                # Run inference mode when there's a command
+                with torch.inference_mode():
+                    actions = policy(obs)
+            
+            # Environment stepping
             obs, _, _, _ = env.step(actions)
             
             # Get the processed joint targets (12 DOF) after CPG processing
@@ -507,17 +461,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             else:
                 joint_targets = actions  # Fallback to raw actions if not available
             
-            # ===== PUBLISH TO ROS2 =====
-            if ros2_node is not None:
-                try:
-                    joint_list = joint_targets[0].cpu().tolist()
-                    ros2_node.publish_joints(joint_list)
-                    cmd_list_ros = cmd[0].cpu().tolist()
-                    ros2_node.publish_cmd(cmd_list_ros)
-                except Exception as e:
-                    if timestep % 100 == 0:
-                        print(f"[WARN] ROS2: {e}")
-            # ===========================
+            # Ensure joint targets are also zero when no command
+            if cmd_magnitude < 0.01:
+                joint_targets = torch.zeros_like(joint_targets)
             
             # Log to CSV (for first environment only to keep file manageable)
             try:
@@ -580,15 +526,6 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             print(f"[INFO] Log saved to: {csv_path}")
         except:
             pass
-        
-        # Cleanup ROS2
-        if ros2_node is not None:
-            try:
-                ros2_node.destroy_node()
-                rclpy.shutdown()
-                print("[INFO] ROS2 closed")
-            except:
-                pass
         
         env.close()
         print("[INFO] Simulation ended successfully")
